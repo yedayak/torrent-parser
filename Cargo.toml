@@ -1,0 +1,14 @@
+[package]
+name = "my-torrent"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+structopt = "0.3.23"
+error-chain = "0.12.4"
+log = "0.4.14"
+env_logger = "0.9.0"
+utf-8 = "0.7.6"
+utf8-bufread = "1.0.0"
