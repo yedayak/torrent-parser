@@ -1,12 +1,12 @@
 #[macro_use]
 extern crate error_chain;
 
+use log::{debug, error, info, log, trace};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader};
+use std::io::BufReader;
 use std::path::PathBuf;
 use structopt::StructOpt;
-use log::{debug, error, info, log, trace};
 use utf8_bufread::{BufRead, CharIter, Error};
 
 mod errors {
@@ -43,12 +43,11 @@ fn main() {
     if let Err(ref e) = run() {
         error!("error: {}", e);
 
+        // Showng error chain
         for e in e.iter().skip(1) {
             error!("caused by: {}", e);
         }
 
-        // The backtrace is not always generated. Try to run this example
-        // with `RUST_BACKTRACE=1`.
         if let Some(backtrace) = e.backtrace() {
             error!("backtrace: {:?}", backtrace);
         }
@@ -98,8 +97,9 @@ fn read_bencoded(
         }
         debug!("Found a string {:?}", actual_string);
         return Ok(Bencoded::String(actual_string));
+    }
     // Numbers are in this format: 'ixxe', for example i456e is the number 456.
-    } else if first_ch == 'i' {
+    else if first_ch == 'i' {
         let mut number_string = String::new();
         let mut digit_count = 0;
         loop {
@@ -192,15 +192,12 @@ fn get_char(reader: &mut std::iter::Peekable<CharIter<BufReader<impl BufRead>>>)
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
-
-    use utf8_bufread::BufRead;
-
     use crate::get_char;
+    use std::io::BufReader;
+    use utf8_bufread::BufRead;
 
     #[test]
     fn reading_one_ascii_char() {
-        // create_reader!("First");
         let mut st = BufReader::new("First".as_bytes());
         let mut peek_reader = st.char_iter().peekable();
         let ch = get_char(&mut peek_reader).unwrap();
@@ -242,7 +239,6 @@ fn peek_char(reader: &mut std::iter::Peekable<CharIter<BufReader<impl BufRead>>>
                     }
                 }
             }
-            // let ch = *ch.as_ref()?;
         }
         None => Err(errors::ErrorKind::CompletedReader.into()),
     }
