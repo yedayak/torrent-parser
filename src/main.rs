@@ -5,9 +5,10 @@ use log::{debug, error, info, log, trace};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
+use std::io::{BufRead, Read};
+use std::iter::FromIterator;
 use std::path::PathBuf;
 use structopt::StructOpt;
-use utf8_bufread::{BufRead, CharIter, Error};
 
 mod errors {
     error_chain! {
@@ -30,12 +31,22 @@ struct Cli {
     verbose: u8,
 }
 
-#[derive(Debug)]
 enum Bencoded {
     Integer(i64),
-    String(String),
+    String(Vec<u8>),
     List(Vec<Bencoded>),
-    Dictionary(HashMap<String, Bencoded>),
+    Dictionary(HashMap<Vec<u8>, Bencoded>),
+}
+
+impl std::fmt::Debug for Bencoded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Integer(arg0) => f.debug_tuple("Integer").field(arg0).finish(),
+            Self::String(arg0) => f.debug_tuple("String").field(&String::from_utf8_lossy(arg0)).finish(),
+            Self::List(arg0) => f.debug_tuple("List").field(arg0).finish(),
+            Self::Dictionary(arg0) => f.debug_tuple("Dictionary").field(arg0).finish(),
+        }
+    }
 }
 
 fn main() {
@@ -65,37 +76,34 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn parse_torrent(mut reader: impl BufRead) -> Result<()> {
-    let mut buf_reader = BufReader::new(reader);
-    let mut reader = buf_reader.char_iter().peekable();
+fn parse_torrent(reader: impl BufRead) -> Result<()> {
+    let buf_reader = BufReader::new(reader);
+    let mut reader = buf_reader;
     loop {
         let bencoded = read_bencoded(&mut reader).chain_err(|| "Failed to parse bencoded")?;
         debug!("{:?}", bencoded)
     }
 }
 
-fn read_bencoded(
-    reader: &mut std::iter::Peekable<CharIter<BufReader<impl BufRead>>>,
-) -> Result<Bencoded> {
+fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
     // This parsing is based on this spec: https://wiki.theory.org/BitTorrentSpecification
 
-    let first_ch = get_char(reader)?;
+    let first_ch = *read_bytes(reader, 1)?.get(0).unwrap() as char;
     // Strings start with a number signifying it's length.
     // For example '4:rick' is the string "rick" with length 4
     if first_ch.is_ascii_digit() {
         debug!("Found a digit, detected a string");
-        let mut string_length = String::new();
-        string_length.push(first_ch);
-        string_length.push_str(read_until(reader, ':')?.as_str());
+        // let mut string_length = String::new();
+        let mut bytes = read_until(reader, ':' as u8)?;
+        bytes.insert(0, first_ch as u8);
+        let digit_chars = bytes.iter().map(|c| *c as char);
+        let string_length = String::from_iter(digit_chars);
         let length = string_length
             .parse::<usize>()
             .chain_err(|| "couldn't parse number")?;
         debug!("Reading {} characters", string_length);
-        let mut actual_string = String::with_capacity(length);
-        for _ in 0..length {
-            actual_string.push(get_char(reader)?);
-        }
-        debug!("Found a string {:?}", actual_string);
+        let actual_string = read_bytes(reader, length)?;
+        debug!("Found a string {:?}", String::from_utf8_lossy(&actual_string));
         return Ok(Bencoded::String(actual_string));
     }
     // Numbers are in this format: 'ixxe', for example i456e is the number 456.
@@ -107,7 +115,7 @@ fn read_bencoded(
             if digit_count > 20 {
                 bail!("Too large numbers (> 64 bit)")
             }
-            let ch = get_char(reader)?;
+            let ch = *read_bytes(reader, 1)?.get(0).unwrap() as char;
             if digit_count >= 1 && ch == 'e' {
                 let number = number_string
                     .parse::<i64>()
@@ -130,8 +138,8 @@ fn read_bencoded(
         let mut items = Vec::<Bencoded>::new();
         let mut current_item: Result<Bencoded>;
         loop {
-            if peek_char(reader)? == 'e' {
-                reader.next();
+            if peek_one_byte(reader)? as char == 'e' {
+                read_one_byte(reader)?;
                 return Ok(Bencoded::List(items));
             }
             current_item = read_bencoded(reader);
@@ -156,14 +164,14 @@ fn read_bencoded(
         debug!("Found dictionary");
         let mut dict = HashMap::new();
         loop {
-            if peek_char(reader)? == 'e' {
-                reader.next();
+            if peek_one_byte(reader)? as char == 'e' {
+                read_one_byte(reader)?;
                 return Ok(Bencoded::Dictionary(dict));
             }
             debug!("Trying to read key");
             let bencoded_key = read_bencoded(reader)?;
             if let Bencoded::String(key) = bencoded_key {
-                debug!("Found key \"{}\", reading value", key);
+                debug!("Found key \"{}\", reading value", String::from_utf8_lossy(&key));
                 let value = read_bencoded(reader)?;
                 debug!("Found value {:?}. Inserting...", value);
                 dict.insert(key, value);
@@ -172,89 +180,117 @@ fn read_bencoded(
             }
         }
     }
-    Ok(Bencoded::String("".to_string()))
+    bail!("Couldn't find valid Bencoded value");
 }
 
-fn get_char(reader: &mut std::iter::Peekable<CharIter<BufReader<impl BufRead>>>) -> Result<char> {
-    let ch = reader.next();
-    match ch {
-        Some(ch) => {
-            let ch = ch.chain_err(|| "")?;
-            if ch == '\0' {
-                Err(errors::ErrorKind::CompletedReader.into())
-            } else {
-                Ok(ch)
-            }
-        }
-        None => Err(errors::ErrorKind::CompletedReader.into()),
+fn read_bytes(reader: &mut BufReader<impl BufRead>, count: usize) -> Result<Vec<u8>> {
+    let mut buf = vec![0; count];
+    let mut bytes_read = reader.read(&mut buf).chain_err(|| "Failed to read bytes")?;
+    while bytes_read < count && bytes_read != 0 {
+        buf.resize(bytes_read, 0);
+        debug!("Tried reading {} bytes, read {} until now", count, bytes_read);
+        let mut new_buf = vec![0; count - bytes_read];
+        bytes_read += reader.read(&mut new_buf).chain_err(|| "Failed to read bytes")?;
+        buf.append(&mut new_buf);
     }
+    Ok(buf)
 }
+
+fn read_one_byte(reader: &mut BufReader<impl BufRead>) -> Result<u8> {
+    Ok(*read_bytes(reader, 1)?.get(0).unwrap())
+}
+
+fn peek_bytes(reader: &mut BufReader<impl BufRead>, byte_count: usize) -> Result<Vec<u8>> {
+    let buf = reader.fill_buf().chain_err(|| "Failed to peek")?;
+    if buf.len() < byte_count {
+        return Err(errors::ErrorKind::CompletedReader.into());
+    }
+    return Ok(buf.get(0..byte_count).unwrap().to_vec());
+}
+
+fn peek_one_byte(reader: &mut BufReader<impl BufRead>) -> Result<u8> {
+    Ok(*peek_bytes(reader, 1)?.get(0).unwrap())
+}
+
+// fn get_char(reader: &mut BufReader<impl BufRead>) -> Result<char> {
+//     let ch = reader.read_exact();
+//     match ch {
+//         Some(ch) => {
+//             let ch = ch.chain_err(|| "")?;
+//             if ch == '\0' {
+//                 Err(errors::ErrorKind::CompletedReader.into())
+//             } else {
+//                 Ok(ch)
+//             }
+//         }
+//         None => Err(errors::ErrorKind::CompletedReader.into()),
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
-    use crate::get_char;
+    use crate::{read_bytes, peek_bytes, read_one_byte, peek_one_byte};
     use std::io::BufReader;
-    use utf8_bufread::BufRead;
 
     #[test]
     fn reading_one_ascii_char() {
-        let mut st = BufReader::new("First".as_bytes());
-        let mut peek_reader = st.char_iter().peekable();
-        let ch = get_char(&mut peek_reader).unwrap();
+        let mut reader = BufReader::new("First".as_bytes());
+        let ch = read_one_byte(&mut reader).unwrap() as char;
         assert_eq!(ch, 'F');
     }
 
-    #[test]
-    fn utf_char() {
-        let mut reader = BufReader::new("שלום".as_bytes());
-        let mut peek_reader = reader.char_iter().peekable();
-        let ch = get_char(&mut peek_reader).expect("");
-        assert_eq!(ch, 'ש');
-    }
+    // #[test]
+    // fn reading_non_utf8_bytes() {
+    //     let reader: BufReader<&[u8]> = BufReader::new(vec![255, 34, 56, 57].as_slice());
+    // }
+
+    // #[test]
+    // fn utf_char() {
+    //     let mut reader = BufReader::new("שלום".as_bytes());
+    //     let mut peek_reader = reader.char_iter().peekable();
+    //     let ch = get_char(&mut peek_reader).expect("");
+    //     assert_eq!(ch, 'ש');
+    // }
 
     #[test]
     fn chars_in_order() {
         let mut reader = BufReader::new("First".as_bytes());
-        let mut peek_reader = reader.char_iter().peekable();
-        let _first_char = get_char(&mut peek_reader).unwrap();
-        let second_char = get_char(&mut peek_reader).unwrap();
+        let _first_char = read_one_byte(&mut reader).unwrap();
+        let second_char = read_one_byte(&mut reader).unwrap() as char;
         assert_eq!(second_char, 'i');
     }
 }
 
-fn peek_char(reader: &mut std::iter::Peekable<CharIter<BufReader<impl BufRead>>>) -> Result<char> {
-    let ch_opt = reader.peek();
-    match ch_opt {
-        Some(ch) => {
-            match ch {
-                Err(error) => {
-                    bail!("Failed to read char: {}", error.to_string());
-                    // Err(error.into())
-                }
-                Ok(ch) => {
-                    if *ch == '\0' {
-                        Err(errors::ErrorKind::CompletedReader.into())
-                    } else {
-                        Ok(*ch)
-                    }
-                }
-            }
-        }
-        None => Err(errors::ErrorKind::CompletedReader.into()),
-    }
-}
+// fn peek_char(reader: &mut BufReader<impl BufRead>) -> Result<char> {
+//     let ch_opt = reader.peek();
+//     match ch_opt {
+//         Some(ch) => {
+//             match ch {
+//                 Err(error) => {
+//                     bail!("Failed to read char: {}", error.to_string());
+//                     // Err(error.into())
+//                 }
+//                 Ok(ch) => {
+//                     if *ch == '\0' {
+//                         Err(errors::ErrorKind::CompletedReader.into())
+//                     } else {
+//                         Ok(*ch)
+//                     }
+//                 }
+//             }
+//         }
+//         None => Err(errors::ErrorKind::CompletedReader.into()),
+//     }
+// }
 
-fn read_until(
-    reader: &mut std::iter::Peekable<CharIter<BufReader<impl BufRead>>>,
-    ch: char,
-) -> Result<String> {
-    let mut str = String::new();
-    let mut current_char: char;
+fn read_until(reader: &mut BufReader<impl BufRead>, ch: u8) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut current_byte: u8;
     loop {
-        current_char = get_char(reader)?;
-        if current_char == ch {
-            return Ok(str);
+        current_byte = read_one_byte(reader)?;
+        if current_byte == ch {
+            return Ok(bytes);
         }
-        str.push(current_char);
+        bytes.push(current_byte);
     }
 }

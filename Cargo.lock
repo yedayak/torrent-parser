@@ -198,8 +198,6 @@ dependencies = [
  "error-chain",
  "log",
  "structopt",
- "utf-8",
- "utf8-bufread",
 ]
 
 [[package]]
@@ -352,18 +350,6 @@ name = "unicode-xid"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ccb82d61f80a663efe1f787a51b16b5a51e3314d6ac365b08639f52387b33f3"
-
-[[package]]
-name = "utf-8"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
-
-[[package]]
-name = "utf8-bufread"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ec9133b06d6f0b8637205906bbeb6df78155559b8a311741f36c559488e0c10"
 
 [[package]]
 name = "vec_map"
