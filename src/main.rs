@@ -35,7 +35,7 @@ enum Bencoded {
     Integer(i64),
     String(Vec<u8>),
     List(Vec<Bencoded>),
-    Dictionary(HashMap<Vec<u8>, Bencoded>),
+    Dictionary(HashMap<String, Bencoded>),
 }
 
 impl std::fmt::Debug for Bencoded {
@@ -171,7 +171,10 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             debug!("Trying to read key");
             let bencoded_key = read_bencoded(reader)?;
             if let Bencoded::String(key) = bencoded_key {
-                debug!("Found key \"{}\", reading value", String::from_utf8_lossy(&key));
+                // Keys are specified by the format so I assume they are actual utf8 strings
+                let key = String::from_utf8(key)
+                    .chain_err(|| "Bad assumption: This key is not utf8??")?;
+                debug!("Found key \"{}\", reading value", key);
                 let value = read_bencoded(reader)?;
                 debug!("Found value {:?}. Inserting...", value);
                 dict.insert(key, value);
