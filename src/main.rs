@@ -42,7 +42,10 @@ impl std::fmt::Debug for Bencoded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Integer(arg0) => f.debug_tuple("Integer").field(arg0).finish(),
-            Self::String(arg0) => f.debug_tuple("String").field(&String::from_utf8_lossy(arg0)).finish(),
+            Self::String(arg0) => f
+                .debug_tuple("String")
+                .field(&String::from_utf8_lossy(arg0))
+                .finish(),
             Self::List(arg0) => f.debug_tuple("List").field(arg0).finish(),
             Self::Dictionary(arg0) => f.debug_tuple("Dictionary").field(arg0).finish(),
         }
@@ -103,7 +106,10 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             .chain_err(|| "couldn't parse number")?;
         debug!("Reading {} characters", string_length);
         let actual_string = read_bytes(reader, length)?;
-        debug!("Found a string {:?}", String::from_utf8_lossy(&actual_string));
+        debug!(
+            "Found a string {:?}",
+            String::from_utf8_lossy(&actual_string)
+        );
         return Ok(Bencoded::String(actual_string));
     }
     // Numbers are in this format: 'ixxe', for example i456e is the number 456.
@@ -191,9 +197,14 @@ fn read_bytes(reader: &mut BufReader<impl BufRead>, count: usize) -> Result<Vec<
     let mut bytes_read = reader.read(&mut buf).chain_err(|| "Failed to read bytes")?;
     while bytes_read < count && bytes_read != 0 {
         buf.resize(bytes_read, 0);
-        debug!("Tried reading {} bytes, read {} until now", count, bytes_read);
+        debug!(
+            "Tried reading {} bytes, read {} until now",
+            count, bytes_read
+        );
         let mut new_buf = vec![0; count - bytes_read];
-        bytes_read += reader.read(&mut new_buf).chain_err(|| "Failed to read bytes")?;
+        bytes_read += reader
+            .read(&mut new_buf)
+            .chain_err(|| "Failed to read bytes")?;
         buf.append(&mut new_buf);
     }
     Ok(buf)
