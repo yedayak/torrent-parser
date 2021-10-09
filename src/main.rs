@@ -31,11 +31,46 @@ struct Cli {
     verbose: u8,
 }
 
+#[derive(PartialEq, Eq)]
 enum Bencoded {
     Integer(i64),
     String(Vec<u8>),
     List(Vec<Bencoded>),
     Dictionary(HashMap<String, Bencoded>),
+}
+
+impl std::fmt::Display for Bencoded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Bencoded::Integer(i) => {
+                write!(f, "{}", i)?;
+            }
+            Bencoded::String(vec) => {
+                if let Ok(str) = String::from_utf8(vec.to_vec()) {
+                    write!(f, "{}", str)?;
+                } else {
+                    for byte in vec.iter().take(20) {
+                        write!(f, "{:#x}", byte)?;
+                    }
+                };
+            }
+            Bencoded::List(list) => {
+                write!(f, "[")?;
+                for item in list.iter() {
+                    write!(f, "{}, ", item)?;
+                }
+                write!(f, "]")?;
+            }
+            Bencoded::Dictionary(dict) => {
+                write!(f, "{{ ")?;
+                for key in dict.keys() {
+                    write!(f, "{}: {}, ", key, dict.get(key).unwrap())?;
+                }
+                write!(f, "}}")?;
+            }
+        };
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Bencoded {
@@ -106,11 +141,9 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             .chain_err(|| "couldn't parse number")?;
         debug!("Reading {} characters", string_length);
         let actual_string = read_bytes(reader, length)?;
-        debug!(
-            "Found a string {:?}",
-            String::from_utf8_lossy(&actual_string)
-        );
-        return Ok(Bencoded::String(actual_string));
+        let str = Bencoded::String(actual_string);
+        debug!("{}", str);
+        return Ok(str);
     }
     // Numbers are in this format: 'ixxe', for example i456e is the number 456.
     else if first_ch == 'i' {
@@ -159,7 +192,6 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
                     }
                 },
                 Ok(value) => {
-                    debug!("Found list item {:?}", value);
                     items.push(value);
                 }
             }
@@ -182,7 +214,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
                     .chain_err(|| "Bad assumption: This key is not utf8??")?;
                 debug!("Found key \"{}\", reading value", key);
                 let value = read_bencoded(reader)?;
-                debug!("Found value {:?}. Inserting...", value);
+                debug!("Found value {}. Inserting...", value);
                 dict.insert(key, value);
             } else {
                 bail!("Only Strings are can be keys in becoded dictionaries")
