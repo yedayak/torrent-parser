@@ -17,6 +17,14 @@ mod errors {
                 description("At the end of the reader, nothing to read")
                 display("Nothing to read")
             }
+            ExceededMaxLength {
+                description("Exceeded the max length of reading specified")
+                display("Max length surpassed")
+            }
+            NoLeadingZeroesAllowd {
+                description("Bencoded integers can't have leading zeroes before them")
+                display("Leading zeroes found")
+            }
             Error
         }
     }
@@ -167,7 +175,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             number_string.push(ch);
             digit_count += 1;
             if digit_count > 1 && number_string.starts_with('0') {
-                bail!("Invalid number: No leading zeroes allowd");
+                return Err(errors::ErrorKind::NoLeadingZeroesAllowd.into());
             }
         }
     }
@@ -222,6 +230,39 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
         }
     }
     bail!("Couldn't find valid Bencoded value");
+}
+
+#[cfg(test)]
+mod bencoded_tests {
+    use crate::errors::*;
+    use crate::{read_bencoded, Bencoded};
+    use std::io::BufReader;
+
+    #[test]
+    fn reading_zero() {
+        let mut reader = BufReader::new("i0e".as_bytes());
+        let value = read_bencoded(&mut reader).unwrap();
+        assert_eq!(value, Bencoded::Integer(0));
+    }
+    #[test]
+    fn no_leading_zeroes_allowd() {
+        let mut reader = BufReader::new("i045e".as_bytes());
+        match read_bencoded(&mut reader) {
+            Err(err) => match err.kind() {
+                ErrorKind::NoLeadingZeroesAllowd => {}
+                _ => panic!("Got wrong error: {}", err.kind()),
+            },
+            Ok(val) => {
+                panic!("Got {} instead of error", val);
+            }
+        }
+    }
+    #[test]
+    fn zero_length_string() {
+        let mut reader = BufReader::new("0:".as_bytes());
+        let result = read_bencoded(&mut reader).unwrap();
+        assert_eq!(result, Bencoded::String(vec![]));
+    }
 }
 
 fn read_bytes(reader: &mut BufReader<impl BufRead>, count: usize) -> Result<Vec<u8>> {
