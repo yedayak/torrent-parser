@@ -258,24 +258,9 @@ fn peek_one_byte(reader: &mut BufReader<impl BufRead>) -> Result<u8> {
     Ok(*peek_bytes(reader, 1)?.get(0).unwrap())
 }
 
-// fn get_char(reader: &mut BufReader<impl BufRead>) -> Result<char> {
-//     let ch = reader.read_exact();
-//     match ch {
-//         Some(ch) => {
-//             let ch = ch.chain_err(|| "")?;
-//             if ch == '\0' {
-//                 Err(errors::ErrorKind::CompletedReader.into())
-//             } else {
-//                 Ok(ch)
-//             }
-//         }
-//         None => Err(errors::ErrorKind::CompletedReader.into()),
-//     }
-// }
-
 #[cfg(test)]
-mod tests {
-    use crate::{read_bytes, peek_bytes, read_one_byte, peek_one_byte};
+mod reader_tests {
+    use crate::{peek_bytes, peek_one_byte, read_bytes, read_one_byte};
     use std::io::BufReader;
 
     #[test]
@@ -285,18 +270,30 @@ mod tests {
         assert_eq!(ch, 'F');
     }
 
-    // #[test]
-    // fn reading_non_utf8_bytes() {
-    //     let reader: BufReader<&[u8]> = BufReader::new(vec![255, 34, 56, 57].as_slice());
-    // }
+    #[test]
+    fn peek_one_doesnt_consume() {
+        let mut reader = BufReader::new("Repeating".as_bytes());
+        let _peeked1 = peek_one_byte(&mut reader).unwrap();
+        let _peeked2 = peek_one_byte(&mut reader).unwrap();
+        let peeked3 = peek_one_byte(&mut reader).unwrap();
+        let consumed = read_one_byte(&mut reader).unwrap();
+        assert_eq!(peeked3, consumed);
+    }
 
-    // #[test]
-    // fn utf_char() {
-    //     let mut reader = BufReader::new("שלום".as_bytes());
-    //     let mut peek_reader = reader.char_iter().peekable();
-    //     let ch = get_char(&mut peek_reader).expect("");
-    //     assert_eq!(ch, 'ש');
-    // }
+    #[test]
+    fn peek_multiple_bytes() {
+        let mut reader = BufReader::new("In a galaxy far far away".as_bytes());
+        let chunk = peek_bytes(&mut reader, 15).unwrap();
+        let consumed_chunk = read_bytes(&mut reader, 14).unwrap();
+        assert_eq!(
+            chunk
+                .iter()
+                .zip(consumed_chunk.iter())
+                .filter(|&(a, b)| a == b)
+                .count(),
+            chunk.len()
+        );
+    }
 
     #[test]
     fn chars_in_order() {
