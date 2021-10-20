@@ -17,13 +17,17 @@ mod errors {
                 description("At the end of the reader, nothing to read")
                 display("Nothing to read")
             }
-            ExceededMaxLength {
+            ExceededMaxLength(length: usize) {
                 description("Exceeded the max length of reading specified")
-                display("Max length surpassed")
+                display("Max length {} surpassed", length)
             }
             NoLeadingZeroesAllowd {
                 description("Bencoded integers can't have leading zeroes before them")
                 display("Leading zeroes found")
+            }
+            WrongTypeInTorrent(found: String) {
+                description("Wrong type in torrent")
+                display("The value {} is the wrong type", found)
             }
             Error
         }
@@ -39,7 +43,7 @@ struct Cli {
     verbose: u8,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 enum Bencoded {
     Integer(i64),
     String(Vec<u8>),
@@ -92,6 +96,76 @@ impl std::fmt::Debug for Bencoded {
             Self::List(arg0) => f.debug_tuple("List").field(arg0).finish(),
             Self::Dictionary(arg0) => f.debug_tuple("Dictionary").field(arg0).finish(),
         }
+    }
+}
+
+impl Bencoded {
+    fn unwrap_integer(&self) -> Result<i64> {
+        match self {
+            Bencoded::Integer(val) => Ok(*val),
+            _ => Err(errors::ErrorKind::WrongTypeInTorrent("Integer".into()).into()),
+        }
+    }
+    fn unwrap_string(&self) -> Result<Vec<u8>> {
+        match self {
+            Bencoded::String(val) => Ok(val.to_vec()),
+            _ => Err(errors::ErrorKind::WrongTypeInTorrent("String".into()).into()),
+        }
+    }
+
+    fn unwrap_string_as_utf8(&self) -> Result<String> {
+        match self {
+            Bencoded::String(val) => Ok(String::from_utf8(val.to_vec())
+                .chain_err(|| "failed converting to utf8 encoded string")?),
+            _ => Err(errors::ErrorKind::WrongTypeInTorrent("String".into()).into()),
+        }
+    }
+    fn unwrap_list(&self) -> Result<Vec<Bencoded>> {
+        match self {
+            Bencoded::List(val) => Ok(val.to_vec()),
+            _ => Err(errors::ErrorKind::WrongTypeInTorrent("List".into()).into()),
+        }
+    }
+    fn unwrap_dictionary(&self) -> Result<&HashMap<String, Bencoded>> {
+        match self {
+            Bencoded::Dictionary(val) => Ok(val),
+            _ => Err(errors::ErrorKind::WrongTypeInTorrent("Dictionary".into()).into()),
+        }
+    }
+}
+
+fn get_string_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<Option<Vec<u8>>> {
+    if map.contains_key(key) {
+        Ok(Some(map.get(key).unwrap().unwrap_string()?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_string_if_exists_as_utf8_string(
+    map: &HashMap<String, Bencoded>,
+    key: &str,
+) -> Result<Option<String>> {
+    if map.contains_key(key) {
+        Ok(Some(map.get(key).unwrap().unwrap_string_as_utf8()?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_integer_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<Option<i64>> {
+    if map.contains_key(key) {
+        Ok(Some(map.get(key).unwrap().unwrap_integer()?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_list_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<Option<Vec<Bencoded>>> {
+    if map.contains_key(key) {
+        Ok(Some(map.get(key).unwrap().unwrap_list()?))
+    } else {
+        Ok(None)
     }
 }
 
@@ -345,27 +419,6 @@ mod reader_tests {
     }
 }
 
-// fn peek_char(reader: &mut BufReader<impl BufRead>) -> Result<char> {
-//     let ch_opt = reader.peek();
-//     match ch_opt {
-//         Some(ch) => {
-//             match ch {
-//                 Err(error) => {
-//                     bail!("Failed to read char: {}", error.to_string());
-//                     // Err(error.into())
-//                 }
-//                 Ok(ch) => {
-//                     if *ch == '\0' {
-//                         Err(errors::ErrorKind::CompletedReader.into())
-//                     } else {
-//                         Ok(*ch)
-//                     }
-//                 }
-//             }
-//         }
-//         None => Err(errors::ErrorKind::CompletedReader.into()),
-//     }
-// }
 
 fn read_until(reader: &mut BufReader<impl BufRead>, ch: u8) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
