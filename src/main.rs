@@ -196,7 +196,45 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn parse_torrent(reader: impl BufRead) -> Result<()> {
+#[derive(Debug)]
+struct SingleFileInfo {
+    length: i64,
+    md5sum: Option<String>,
+}
+
+#[derive(Debug)]
+struct FileInfo {
+    length: i64,
+    md5sum: Option<String>,
+    path: Vec<String>,
+}
+
+#[derive(Debug)]
+struct Info {
+    piece_length: i64,
+    pieces: Vec<u8>,
+    private: Option<i64>,
+
+    // If there is a single file
+    file: Option<SingleFileInfo>,
+    // If there are multiple files
+    files: Option<Vec<FileInfo>>,
+    // This can means two different things: If there is one file, this is it's name.
+    // If there are multiple this is the directory the files want to be in.
+    name: String,
+}
+
+#[derive(Debug)]
+struct Torrent {
+    info: Info,
+    announce: String,
+    announce_list: Option<Vec<Vec<String>>>,
+    creation_date: Option<i64>,
+    comment: Option<String>,
+    created_by: Option<String>,
+    encoding: Option<String>,
+}
+
     let buf_reader = BufReader::new(reader);
     let mut reader = buf_reader;
     loop {
