@@ -192,7 +192,8 @@ fn run() -> Result<()> {
     debug!("Reading file {:?}, Verbosity: {}", args.file, args.verbose);
     let file = File::open(args.file).chain_err(|| "Couldn't open file")?;
     let reader = BufReader::new(file);
-    parse_torrent(reader)?;
+    let torrent = parse_torrent(reader)?;
+    debug!("parsed torrent: \n{:?}", torrent);
     Ok(())
 }
 
@@ -235,11 +236,133 @@ struct Torrent {
     encoding: Option<String>,
 }
 
+fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
     let buf_reader = BufReader::new(reader);
     let mut reader = buf_reader;
-    loop {
-        let bencoded = read_bencoded(&mut reader).chain_err(|| "Failed to parse bencoded")?;
-        debug!("{:?}", bencoded)
+    let torrent_dict = read_bencoded(&mut reader).chain_err(|| "Failed to parse bencoded")?;
+    debug!("{}", torrent_dict);
+    match torrent_dict {
+        Bencoded::Dictionary(ref map) => {
+            if !map.contains_key("announce") {
+                bail!("No announce key, invalid torrent");
+            }
+            let announce = map.get("announce").unwrap().unwrap_string_as_utf8()?;
+            let creation_date = get_integer_if_exists(map, "creation date")?;
+            let comment = get_string_if_exists_as_utf8_string(map, "comment")?;
+            let created_by = get_string_if_exists_as_utf8_string(map, "created by")?;
+            let encoding = get_string_if_exists_as_utf8_string(map, "encoding")?;
+
+            let announce_list = match get_list_if_exists(map, "announce-list")? {
+                None => None,
+                Some(bencoded_tracker_tiers) => {
+                    let mut tiers: Vec<Vec<String>> = Vec::new();
+                    for bencoded_tier in bencoded_tracker_tiers {
+                        let mut tier = Vec::new();
+                        for tracker in bencoded_tier.unwrap_list()? {
+                            tier.push(tracker.unwrap_string_as_utf8()?);
+                        }
+                        tiers.push(tier);
+                    }
+                    Some(tiers)
+                }
+            };
+
+            if !map.contains_key("info") {
+                bail!("No info dictionary, invalid torrent");
+            }
+            match map.get("info").unwrap() {
+                Bencoded::Dictionary(info) => {
+                    if !info.contains_key("piece length") {
+                        bail!("No piece length in info dict")
+                    }
+                    let piece_length = info.get("piece length").unwrap().unwrap_integer()?;
+                    let pieces = info.get("pieces").unwrap().unwrap_string()?;
+                    let private: Option<i64> = get_integer_if_exists(info, "private")?;
+
+                    // Multiple files mode
+                    if info.contains_key("files") {
+                        if !info.contains_key("name") {
+                            bail!("No name for directory");
+                        }
+                        let direcotry = info.get("name").unwrap().unwrap_string_as_utf8()?;
+                        let files = info.get("files").unwrap().unwrap_list()?;
+                        let mut file_list = Vec::<FileInfo>::new();
+                        for file in files.iter() {
+                            let file = file.unwrap_dictionary()?;
+                            if !file.contains_key("length") {
+                                bail!("No length for file");
+                            }
+                            let length = file.get("length").unwrap().unwrap_integer()?;
+                            let md5sum = get_string_if_exists(file, "md5sum")?
+                                .as_ref()
+                                .map(|vec| String::from_utf8_lossy(vec).to_string());
+                            if !file.contains_key("path") {
+                                bail!("No path for file");
+                            }
+                            let path = file.get("path").unwrap().unwrap_list()?;
+                            let mut path_parts = Vec::<String>::new();
+                            for bencoded_part in path.iter() {
+                                let part = bencoded_part.unwrap_string_as_utf8()?;
+                                path_parts.push(part);
+                            }
+                            file_list.push(FileInfo {
+                                length,
+                                md5sum,
+                                path: path_parts,
+                            })
+                        }
+                        return Ok(Torrent {
+                            announce,
+                            announce_list,
+                            comment,
+                            created_by,
+                            creation_date,
+                            encoding,
+                            info: Info {
+                                private,
+                                piece_length,
+                                pieces,
+                                file: None,
+                                files: Some(file_list),
+                                name: direcotry,
+                            },
+                        });
+                    }
+                    // Single file mode
+                    else {
+                        if !info.contains_key("name") {
+                            bail!("No name for file");
+                        }
+                        let name = info.get("name").unwrap().unwrap_string_as_utf8()?;
+                        if !info.contains_key("length") {
+                            bail!("no length contained for file");
+                        }
+                        let length = info.get("length").unwrap().unwrap_integer()?;
+                        let md5sum = get_string_if_exists_as_utf8_string(info, "md5sum")?;
+                        return Ok(Torrent {
+                            announce,
+                            announce_list,
+                            comment,
+                            created_by,
+                            creation_date,
+                            encoding,
+                            info: Info {
+                                private,
+                                piece_length,
+                                pieces,
+                                file: Some(SingleFileInfo { length, md5sum }),
+                                files: None,
+                                name,
+                            },
+                        });
+                    }
+                }
+                _ => bail!("Info is not a dictionary"),
+            }
+        }
+        _ => {
+            bail!("Not a dictionary, an invalid torrent file");
+        }
     }
 }
 
