@@ -251,8 +251,8 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
     // For example '4:rick' is the string "rick" with length 4
     if first_ch.is_ascii_digit() {
         debug!("Found a digit, detected a string");
-        // let mut string_length = String::new();
-        let mut bytes = read_until(reader, ':' as u8)?;
+        // This max length is ridiculous, I doubt it's usefull
+        let mut bytes = read_until(reader, ':' as u8, Some(usize::MAX))?;
         bytes.insert(0, first_ch as u8);
         let digit_chars = bytes.iter().map(|c| *c as char);
         let string_length = String::from_iter(digit_chars);
@@ -457,8 +457,11 @@ mod reader_tests {
     }
 }
 
-
-fn read_until(reader: &mut BufReader<impl BufRead>, ch: u8) -> Result<Vec<u8>> {
+fn read_until(
+    reader: &mut BufReader<impl BufRead>,
+    ch: u8,
+    max_length: Option<usize>,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut current_byte: u8;
     loop {
@@ -467,5 +470,10 @@ fn read_until(reader: &mut BufReader<impl BufRead>, ch: u8) -> Result<Vec<u8>> {
             return Ok(bytes);
         }
         bytes.push(current_byte);
+        if let Some(max) = max_length {
+            if bytes.len() > max {
+                bail!(errors::ErrorKind::ExceededMaxLength(max));
+            }
+        }
     }
 }
