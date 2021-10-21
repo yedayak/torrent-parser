@@ -471,6 +471,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
 mod bencoded_tests {
     use crate::errors::*;
     use crate::{read_bencoded, Bencoded};
+    use std::collections::HashMap;
     use std::io::BufReader;
 
     #[test]
@@ -497,6 +498,33 @@ mod bencoded_tests {
         let mut reader = BufReader::new("0:".as_bytes());
         let result = read_bencoded(&mut reader).unwrap();
         assert_eq!(result, Bencoded::String(vec![]));
+    }
+
+    #[test]
+    fn empty_list() {
+        let mut reader = BufReader::new("le".as_bytes());
+        let result = read_bencoded(&mut reader).unwrap();
+        assert_eq!(result, Bencoded::List(vec![]));
+    }
+
+    #[test]
+    fn list_in_list_list() {
+        let mut reader = BufReader::new("llleee".as_bytes());
+        let expected = Bencoded::List(vec![Bencoded::List(vec![Bencoded::List(vec![])])]);
+        let result = read_bencoded(&mut reader).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn different_types_in_list() {
+        let mut reader = BufReader::new("li45e3:firdee".as_bytes());
+        let expected = Bencoded::List(vec![
+            Bencoded::Integer(45),
+            Bencoded::String("fir".as_bytes().to_vec()),
+            Bencoded::Dictionary(HashMap::new()),
+        ]);
+        let result = read_bencoded(&mut reader).unwrap();
+        assert_eq!(result, expected);
     }
 }
 
