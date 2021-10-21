@@ -588,7 +588,7 @@ mod reader_tests {
     fn peek_multiple_bytes() {
         let mut reader = BufReader::new("In a galaxy far far away".as_bytes());
         let chunk = peek_bytes(&mut reader, 15).unwrap();
-        let consumed_chunk = read_bytes(&mut reader, 14).unwrap();
+        let consumed_chunk = read_bytes(&mut reader, 15).unwrap();
         assert_eq!(
             chunk
                 .iter()
