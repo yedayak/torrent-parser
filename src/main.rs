@@ -3,6 +3,7 @@ extern crate error_chain;
 
 use log::{debug, error, info, log, trace};
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::BufReader;
 use std::io::{BufRead, Read};
@@ -44,11 +45,51 @@ struct Cli {
 }
 
 #[derive(PartialEq, Eq, Clone)]
+struct OrderdDict<V> {
+    inner: HashMap<String, V>,
+    keys: Vec<String>,
+}
+
+impl<V: Debug> std::fmt::Debug for OrderdDict<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrderdDict")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<V> OrderdDict<V> {
+    fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+            keys: Vec::new(),
+        }
+    }
+
+    fn keys(&self) -> Vec<String> {
+        return self.keys.clone();
+    }
+    fn get(&self, key: &str) -> Option<&V> {
+        self.inner.get(&key.to_string())
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.keys.contains(&key.to_string())
+    }
+
+    fn insert(&mut self, key: &str, value: V) {
+        // No need to check if key is already present, we're fine with duplicate keys
+        self.inner.insert(key.to_string(), value);
+        self.keys.push(key.to_string())
+    }
+}
+
+#[derive(PartialEq, Eq, Clone)]
 enum Bencoded {
     Integer(i64),
     String(Vec<u8>),
     List(Vec<Bencoded>),
-    Dictionary(HashMap<String, Bencoded>),
+    Dictionary(OrderdDict<Bencoded>),
 }
 
 impl std::fmt::Display for Bencoded {
@@ -76,7 +117,7 @@ impl std::fmt::Display for Bencoded {
             Bencoded::Dictionary(dict) => {
                 write!(f, "{{ ")?;
                 for key in dict.keys() {
-                    write!(f, "{}: {}, ", key, dict.get(key).unwrap())?;
+                    write!(f, "{}: {}, ", key, dict.get(&key).unwrap())?;
                 }
                 write!(f, "}}")?;
             }
@@ -126,7 +167,7 @@ impl Bencoded {
             _ => Err(errors::ErrorKind::WrongTypeInTorrent("List".into()).into()),
         }
     }
-    fn unwrap_dictionary(&self) -> Result<&HashMap<String, Bencoded>> {
+    fn unwrap_dictionary(&self) -> Result<&OrderdDict<Bencoded>> {
         match self {
             Bencoded::Dictionary(val) => Ok(val),
             _ => Err(errors::ErrorKind::WrongTypeInTorrent("Dictionary".into()).into()),
@@ -134,7 +175,7 @@ impl Bencoded {
     }
 }
 
-fn get_string_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<Option<Vec<u8>>> {
+fn get_string_if_exists(map: &OrderdDict<Bencoded>, key: &str) -> Result<Option<Vec<u8>>> {
     if map.contains_key(key) {
         Ok(Some(map.get(key).unwrap().unwrap_string()?))
     } else {
@@ -143,7 +184,7 @@ fn get_string_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<Op
 }
 
 fn get_string_if_exists_as_utf8_string(
-    map: &HashMap<String, Bencoded>,
+    map: &OrderdDict<Bencoded>,
     key: &str,
 ) -> Result<Option<String>> {
     if map.contains_key(key) {
@@ -153,7 +194,7 @@ fn get_string_if_exists_as_utf8_string(
     }
 }
 
-fn get_integer_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<Option<i64>> {
+fn get_integer_if_exists(map: &OrderdDict<Bencoded>, key: &str) -> Result<Option<i64>> {
     if map.contains_key(key) {
         Ok(Some(map.get(key).unwrap().unwrap_integer()?))
     } else {
@@ -161,7 +202,7 @@ fn get_integer_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<O
     }
 }
 
-fn get_list_if_exists(map: &HashMap<String, Bencoded>, key: &str) -> Result<Option<Vec<Bencoded>>> {
+fn get_list_if_exists(map: &OrderdDict<Bencoded>, key: &str) -> Result<Option<Vec<Bencoded>>> {
     if map.contains_key(key) {
         Ok(Some(map.get(key).unwrap().unwrap_list()?))
     } else {
@@ -443,7 +484,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
     // This is a dictionary
     else if first_ch == 'd' {
         debug!("Found dictionary");
-        let mut dict = HashMap::new();
+        let mut dict = OrderdDict::new();
         loop {
             if peek_one_byte(reader)? as char == 'e' {
                 read_one_byte(reader)?;
@@ -458,7 +499,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
                 debug!("Found key \"{}\", reading value", key);
                 let value = read_bencoded(reader)?;
                 debug!("Found value {}. Inserting...", value);
-                dict.insert(key, value);
+                dict.insert(&key, value);
             } else {
                 bail!("Only Strings are can be keys in becoded dictionaries")
             }
@@ -469,7 +510,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
 
 #[cfg(test)]
 mod bencoded_tests {
-    use crate::errors::*;
+    use crate::{errors::*, OrderdDict};
     use crate::{read_bencoded, Bencoded};
     use std::collections::HashMap;
     use std::io::BufReader;
@@ -521,7 +562,7 @@ mod bencoded_tests {
         let expected = Bencoded::List(vec![
             Bencoded::Integer(45),
             Bencoded::String("fir".as_bytes().to_vec()),
-            Bencoded::Dictionary(HashMap::new()),
+            Bencoded::Dictionary(OrderdDict::new()),
         ]);
         let result = read_bencoded(&mut reader).unwrap();
         assert_eq!(result, expected);
