@@ -2,6 +2,7 @@
 extern crate error_chain;
 
 use log::{debug, error, info, log, trace};
+use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs::File;
@@ -175,6 +176,30 @@ impl Bencoded {
     }
 }
 
+impl Bencoded {
+    fn encode(&self) -> Vec<u8> {
+        match self {
+            Bencoded::Integer(num) => format!("i{}e", num).as_bytes().to_vec(),
+            Bencoded::String(st) => [st.len().to_string().as_bytes(), &[':' as u8], st].concat(),
+            Bencoded::List(list) => {
+                let mut chars = list.iter().flat_map(|i| i.encode()).collect::<Vec<u8>>();
+                chars.insert(0, 'l' as u8);
+                chars.push('e' as u8);
+                chars
+            }
+            Bencoded::Dictionary(dict) => {
+                let mut vec = vec!['d' as u8];
+                for key in dict.keys() {
+                    vec.append(&mut Bencoded::String(key.as_bytes().to_vec()).encode());
+                    vec.append(&mut dict.get(&key).unwrap().encode());
+                }
+                vec.push('e' as u8);
+                vec
+            }
+        }
+    }
+}
+
 fn get_string_if_exists(map: &OrderdDict<Bencoded>, key: &str) -> Result<Option<Vec<u8>>> {
     if map.contains_key(key) {
         Ok(Some(map.get(key).unwrap().unwrap_string()?))
@@ -234,7 +259,8 @@ fn run() -> Result<()> {
     let file = File::open(args.file).chain_err(|| "Couldn't open file")?;
     let reader = BufReader::new(file);
     let torrent = parse_torrent(reader)?;
-    debug!("parsed torrent: \n{:?}", torrent);
+    // debug!("parsed torrent: \n{:?}", torrent);
+    debug!("info hash: {:x?}", torrent.info_hash);
     Ok(())
 }
 
@@ -269,6 +295,7 @@ struct Info {
 #[derive(Debug)]
 struct Torrent {
     info: Info,
+    info_hash: Vec<u8>,
     announce: String,
     announce_list: Option<Vec<Vec<String>>>,
     creation_date: Option<i64>,
@@ -311,94 +338,97 @@ fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
             if !map.contains_key("info") {
                 bail!("No info dictionary, invalid torrent");
             }
-            match map.get("info").unwrap() {
-                Bencoded::Dictionary(info) => {
-                    if !info.contains_key("piece length") {
-                        bail!("No piece length in info dict")
-                    }
-                    let piece_length = info.get("piece length").unwrap().unwrap_integer()?;
-                    let pieces = info.get("pieces").unwrap().unwrap_string()?;
-                    let private: Option<i64> = get_integer_if_exists(info, "private")?;
+            let raw_info = map.get("info").unwrap();
+            let mut hasher = Sha1::new();
+            hasher.update(raw_info.encode());
+            let info_hash = hasher.finalize().to_vec();
 
-                    // Multiple files mode
-                    if info.contains_key("files") {
-                        if !info.contains_key("name") {
-                            bail!("No name for directory");
-                        }
-                        let direcotry = info.get("name").unwrap().unwrap_string_as_utf8()?;
-                        let files = info.get("files").unwrap().unwrap_list()?;
-                        let mut file_list = Vec::<FileInfo>::new();
-                        for file in files.iter() {
-                            let file = file.unwrap_dictionary()?;
-                            if !file.contains_key("length") {
-                                bail!("No length for file");
-                            }
-                            let length = file.get("length").unwrap().unwrap_integer()?;
-                            let md5sum = get_string_if_exists(file, "md5sum")?
-                                .as_ref()
-                                .map(|vec| String::from_utf8_lossy(vec).to_string());
-                            if !file.contains_key("path") {
-                                bail!("No path for file");
-                            }
-                            let path = file.get("path").unwrap().unwrap_list()?;
-                            let mut path_parts = Vec::<String>::new();
-                            for bencoded_part in path.iter() {
-                                let part = bencoded_part.unwrap_string_as_utf8()?;
-                                path_parts.push(part);
-                            }
-                            file_list.push(FileInfo {
-                                length,
-                                md5sum,
-                                path: path_parts,
-                            })
-                        }
-                        return Ok(Torrent {
-                            announce,
-                            announce_list,
-                            comment,
-                            created_by,
-                            creation_date,
-                            encoding,
-                            info: Info {
-                                private,
-                                piece_length,
-                                pieces,
-                                file: None,
-                                files: Some(file_list),
-                                name: direcotry,
-                            },
-                        });
-                    }
-                    // Single file mode
-                    else {
-                        if !info.contains_key("name") {
-                            bail!("No name for file");
-                        }
-                        let name = info.get("name").unwrap().unwrap_string_as_utf8()?;
-                        if !info.contains_key("length") {
-                            bail!("no length contained for file");
-                        }
-                        let length = info.get("length").unwrap().unwrap_integer()?;
-                        let md5sum = get_string_if_exists_as_utf8_string(info, "md5sum")?;
-                        return Ok(Torrent {
-                            announce,
-                            announce_list,
-                            comment,
-                            created_by,
-                            creation_date,
-                            encoding,
-                            info: Info {
-                                private,
-                                piece_length,
-                                pieces,
-                                file: Some(SingleFileInfo { length, md5sum }),
-                                files: None,
-                                name,
-                            },
-                        });
-                    }
+            let info = raw_info.unwrap_dictionary()?;
+            if !info.contains_key("piece length") {
+                bail!("No piece length in info dict")
+            }
+            let piece_length = info.get("piece length").unwrap().unwrap_integer()?;
+            let pieces = info.get("pieces").unwrap().unwrap_string()?;
+            let private: Option<i64> = get_integer_if_exists(info, "private")?;
+
+            // Multiple files mode
+            if info.contains_key("files") {
+                if !info.contains_key("name") {
+                    bail!("No name for directory");
                 }
-                _ => bail!("Info is not a dictionary"),
+                let direcotry = info.get("name").unwrap().unwrap_string_as_utf8()?;
+                let files = info.get("files").unwrap().unwrap_list()?;
+                let mut file_list = Vec::<FileInfo>::new();
+                for file in files.iter() {
+                    let file = file.unwrap_dictionary()?;
+                    if !file.contains_key("length") {
+                        bail!("No length for file");
+                    }
+                    let length = file.get("length").unwrap().unwrap_integer()?;
+                    let md5sum = get_string_if_exists(file, "md5sum")?
+                        .as_ref()
+                        .map(|vec| String::from_utf8_lossy(vec).to_string());
+                    if !file.contains_key("path") {
+                        bail!("No path for file");
+                    }
+                    let path = file.get("path").unwrap().unwrap_list()?;
+                    let mut path_parts = Vec::<String>::new();
+                    for bencoded_part in path.iter() {
+                        let part = bencoded_part.unwrap_string_as_utf8()?;
+                        path_parts.push(part);
+                    }
+                    file_list.push(FileInfo {
+                        length,
+                        md5sum,
+                        path: path_parts,
+                    })
+                }
+                return Ok(Torrent {
+                    announce,
+                    announce_list,
+                    comment,
+                    created_by,
+                    creation_date,
+                    encoding,
+                    info: Info {
+                        private,
+                        piece_length,
+                        pieces,
+                        file: None,
+                        files: Some(file_list),
+                        name: direcotry,
+                    },
+                    info_hash,
+                });
+            }
+            // Single file mode
+            else {
+                if !info.contains_key("name") {
+                    bail!("No name for file");
+                }
+                let name = info.get("name").unwrap().unwrap_string_as_utf8()?;
+                if !info.contains_key("length") {
+                    bail!("no length contained for file");
+                }
+                let length = info.get("length").unwrap().unwrap_integer()?;
+                let md5sum = get_string_if_exists_as_utf8_string(info, "md5sum")?;
+                return Ok(Torrent {
+                    announce,
+                    announce_list,
+                    comment,
+                    created_by,
+                    creation_date,
+                    encoding,
+                    info: Info {
+                        private,
+                        piece_length,
+                        pieces,
+                        file: Some(SingleFileInfo { length, md5sum }),
+                        files: None,
+                        name,
+                    },
+                    info_hash,
+                });
             }
         }
         _ => {
@@ -566,6 +596,13 @@ mod bencoded_tests {
         ]);
         let result = read_bencoded(&mut reader).unwrap();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn encode_decode() {
+        let st = "d5:ewsdfli45e3:firdeee".as_bytes();
+        let mut reader = BufReader::new(st);
+        assert_eq!(read_bencoded(&mut reader).unwrap().encode(), st);
     }
 }
 
