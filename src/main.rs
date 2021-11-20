@@ -6,6 +6,7 @@ use log::{debug, error, info, log, trace};
 use num_enum::TryFromPrimitive;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use reqwest::{Error, Url};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -311,6 +312,50 @@ struct Torrent {
     encoding: Option<String>,
 }
 
+impl Info {
+    fn total_length(&self) -> Result<i64> {
+        if let Some(file) = &self.file {
+            return Ok(file.length);
+        } else if let Some(files) = &self.files {
+            return Ok(files.iter().fold(0i64, |sum, file| sum + file.length));
+        }
+        bail!("No files in torrent???");
+    }
+}
+
+fn url_encode_bytes(bytes: &Vec<u8>) -> String {
+    // URL encoding arbitary bytes according to bittorrent spec
+    // https://wiki.theory.org/BitTorrentSpecification#Tracker_HTTP.2FHTTPS_Protocol
+
+    let unencoded_chars =
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-_~".as_bytes();
+    let mut encoded = String::new();
+    for byte in bytes {
+        if unencoded_chars.contains(&byte) {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{:X?}", byte))
+        }
+    }
+    return encoded;
+}
+
+fn build_url(base: &String, torrent: &Torrent) -> Result<reqwest::Url> {
+    Url::parse_with_params(
+        base,
+        vec![
+            ("peer_id", "-SD6578"),
+            ("info_hash", &url_encode_bytes(&torrent.info_hash)),
+            ("port", "6888"),
+            ("uploaded", "0"),
+            ("downloaded", "0"),
+            ("left", &torrent.info.total_length()?.to_string()),
+            ("compact", "0"),
+            ("event", "started"),
+        ],
+    )
+    .chain_err(|| "Failed to parse announce url and parmeters")
+}
 
 #[derive(PartialEq, TryFromPrimitive)]
 #[repr(i32)]
@@ -505,8 +550,32 @@ fn get_peers(torrent: &Torrent) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
+async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("Not a http(s) url");
+    }
+    debug!("Constructing url");
+    let url = build_url(&torrent.announce, &torrent)?;
+    let response = reqwest::get(url)
+        .await
+        .chain_err(|| "Failed to get announce url")?;
+    let text = response
+        .text()
+        .await
+        .chain_err(|| "Couldn't read response text")?;
+    debug!("Got text: {}", text);
+    let decoded_response = read_bencoded(&mut BufReader::new(text.as_bytes()))?;
+    if let Some(failure_reason) = get_string_if_exists_as_utf8_string(
+        decoded_response.unwrap_dictionary()?,
+        "failure reason",
+    )? {
+        info!("Error from tracker: {}", failure_reason);
+        bail!("Tracker responded with error {}", failure_reason);
+    }
+    dbg!(decoded_response);
     Ok(())
 }
+
 fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
     let buf_reader = BufReader::new(reader);
     let mut reader = buf_reader;
@@ -637,6 +706,20 @@ fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
         _ => {
             bail!("Not a dictionary, an invalid torrent file");
         }
+    }
+}
+
+#[cfg(test)]
+mod torrent_tests {
+    use crate::url_encode_bytes;
+    #[test]
+    fn encoding_bytes() {
+        let bytes: Vec<u8> = vec![
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+            0xef, 0x12, 0x34, 0x56, 0x78, 0x9a,
+        ];
+        let encoded = url_encode_bytes(&bytes);
+        assert_eq!(&encoded, "%124Vx%9A%BC%DE%F1%23Eg%89%AB%CD%EF%124Vx%9A")
     }
 }
 
