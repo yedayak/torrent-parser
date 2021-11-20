@@ -1,7 +1,11 @@
 #[macro_use]
 extern crate error_chain;
 
+use bytes::{Buf, Bytes};
 use log::{debug, error, info, log, trace};
+use num_enum::TryFromPrimitive;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -9,6 +13,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::io::{BufRead, Read};
 use std::iter::FromIterator;
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -70,6 +75,7 @@ impl<V> OrderdDict<V> {
     fn keys(&self) -> Vec<String> {
         return self.keys.clone();
     }
+
     fn get(&self, key: &str) -> Option<&V> {
         self.inner.get(&key.to_string())
     }
@@ -261,6 +267,7 @@ fn run() -> Result<()> {
     let torrent = parse_torrent(reader)?;
     // debug!("parsed torrent: \n{:?}", torrent);
     debug!("info hash: {:x?}", torrent.info_hash);
+    get_peers(&torrent)?;
     Ok(())
 }
 
@@ -304,11 +311,207 @@ struct Torrent {
     encoding: Option<String>,
 }
 
+
+#[derive(PartialEq, TryFromPrimitive)]
+#[repr(i32)]
+enum AnnounceEvent {
+    None = 0,
+    Completed = 1,
+    Started = 2,
+    Stopped = 3,
+}
+
+#[derive(PartialEq, TryFromPrimitive)]
+#[repr(i32)]
+enum AnnounceAction {
+    Connect = 0,
+    Announce = 1,
+}
+
+fn create_udp_socket(url: &str) -> Result<UdpSocket> {
+    let socket = UdpSocket::bind("0.0.0.0:7686").chain_err(|| "failed to create udp socket")?;
+    debug!("connecting to {}", url);
+    socket.connect(url).chain_err(|| "Couldn't connect")?;
+    Ok(socket)
+}
+
+fn connect_udp(socket: &UdpSocket) -> Result<i64> {
+    // Gets connection id using the socket
+    let mut packet = Vec::<u8>::with_capacity(64 + 32 + 32);
+    let protocol_id = 0x41727101980i64;
+    let action = AnnounceAction::Connect as i32; // Connect
+    let transaction_id = rand::random::<i32>();
+    packet.extend(protocol_id.to_be_bytes());
+    packet.extend(action.to_be_bytes());
+    packet.extend(transaction_id.to_be_bytes());
+    socket
+        .send(&packet)
+        .chain_err(|| "Couldn't send udp message")?;
+    const MAX_RESPONSE_SIZE: usize = 1500; //MTU
+    let mut buf = [0; MAX_RESPONSE_SIZE];
+    let bytes_read = socket
+        .recv(&mut buf)
+        .chain_err(|| "Couldn't receive data")?;
+    debug!("Read {} bytes", bytes_read);
+    let mut response = Bytes::from(Box::from(&buf[..bytes_read]));
+    if response.len() < 16 {
+        error!("Invalid packet: too small");
+        bail!("Invalid packet: too small");
+    }
+
+    let action = response.get_i32();
+    if AnnounceAction::try_from_primitive(action) != Ok(AnnounceAction::Connect) {
+        error!(
+            "Got wrong action: sent {}, received {}",
+            AnnounceAction::Connect as i32,
+            action
+        );
+        bail!("")
+    }
+    let received_transaction_id = response.get_i32();
+    if received_transaction_id.ne(&transaction_id) {
+        bail!(
+            "Wrong transaction id: expected {:X}, got {:X}",
+            transaction_id,
+            received_transaction_id
+        );
+    }
+    let connection_id = response.get_i64();
+    return Ok(connection_id);
+}
+
+fn choose_listen_port() -> i16 {
+    return 6881;
+}
+
+fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Result<()> {
+    let mut packet = Vec::<u8>::with_capacity(96);
+    let action = AnnounceAction::Announce as i32;
+    let transaction_id = rand::random::<i32>();
+    let info_hash = &torrent.info_hash;
+    let peer_id = "-SD6578123456789o012".bytes();
+    let downlaoded = 0i64;
+    let left = torrent.info.total_length()?;
+    let uploaded = 0i64;
+    let event = AnnounceEvent::Started as i32;
+    let ip_address = 0i32;
+    let key = 0i32;
+    let num_want = -1i32;
+    let port = choose_listen_port();
+    packet.extend(connection_id.to_be_bytes());
+    packet.extend(action.to_be_bytes());
+    packet.extend(transaction_id.to_be_bytes());
+    packet.extend(info_hash);
+    packet.extend(peer_id);
+    packet.extend(downlaoded.to_be_bytes());
+    packet.extend(left.to_be_bytes());
+    packet.extend(uploaded.to_be_bytes());
+    packet.extend(event.to_be_bytes());
+    packet.extend(ip_address.to_be_bytes());
+    packet.extend(key.to_be_bytes());
+    packet.extend(num_want.to_be_bytes());
+    packet.extend(port.to_be_bytes());
+    socket
+        .send(&packet)
+        .chain_err(|| "Couldn't send udp message")?;
+
+    const MAX_RESPONSE_SIZE: usize = 1500;
+    let mut response = [0; MAX_RESPONSE_SIZE];
+    let bytes_read = socket
+        .recv(&mut response)
+        .chain_err(|| "Couldn't receive data")?;
+    debug!("Read {} bytes", bytes_read);
+    let mut response = Bytes::from(Box::from(&response[..bytes_read]));
+    if response.len() < 20 {
+        error!("Invalid packet: too small");
+        bail!("Invalid packet: too small");
+    }
+    debug!("{:?}", response);
+    let action = response.get_i32();
+    if AnnounceAction::try_from_primitive(action) != Ok(AnnounceAction::Announce) {
+        error!(
+            "Got wrong action: sent {}, received {}",
+            AnnounceAction::Announce as i32,
+            action
+        );
+        bail!("Wrong action")
+    }
+
+    let received_transaction_id = response.get_i32();
+    if transaction_id.ne(&received_transaction_id) {
+        bail!(
+            "Wrong transaction_id: expected {} got {}",
+            transaction_id,
+            received_transaction_id
+        );
+    }
+    let interval = response.get_i32();
+    let leechers = response.get_i32();
+    let seeders = response.get_i32();
+    let peers_count = response.remaining() / 6;
+    let mut peers: Vec<(Ipv4Addr, u16)> = Vec::with_capacity(peers_count);
+    for _ in 1..peers_count {
+        let ip = Ipv4Addr::new(
+            response.get_u8(),
+            response.get_u8(),
+            response.get_u8(),
+            response.get_u8(),
+        );
+        let port = response.get_u16();
+        peers.push((ip, port));
+    }
+    debug!("peers: {:?}", peers);
+
+    Ok(())
+}
+
+fn try_url(url: &String, torrent: &Torrent) -> Result<Vec<String>> {
+    if url.starts_with("udp://") {
+        // According to spec https://www.bittorrent.org/beps/bep_0015.html
+        let url = &url[6..];
+        let socket = create_udp_socket(&url)?;
+        let connection_id = connect_udp(&socket)?;
+        announce_udp(&socket, connection_id, torrent)?;
+
+        debug!("Got connection id {} from {}", connection_id, url);
+    } else if url.starts_with("http") {
+        todo!();
+        // contact_tracker_http(url, torrent);
+    }
+    Ok(Vec::new())
+}
+
+fn get_peers(torrent: &Torrent) -> Result<Vec<String>> {
+    // Spec: https://www.bittorrent.org/beps/bep_0012.html
+    info!("Trying announce {}", torrent.announce);
+    match try_url(&torrent.announce, &torrent) {
+        Ok(peers) => return Ok(peers),
+        Err(err) => info!("Failed to get url {} : {}", torrent.announce, err),
+    }
+    if let Some(ref announce_list) = torrent.announce_list {
+        info!("Trying trackers from announce list");
+        for tier in announce_list {
+            let mut tier = tier.clone();
+            tier.shuffle(&mut thread_rng());
+            for tracker in tier {
+                debug!("Trying tracker {}", tracker);
+                match try_url(&tracker, torrent) {
+                    Ok(peers) => return Ok(peers),
+                    Err(err) => info!("Failed to get url {} : {}", torrent.announce, err),
+                }
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+    Ok(())
+}
 fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
     let buf_reader = BufReader::new(reader);
     let mut reader = buf_reader;
     let torrent_dict = read_bencoded(&mut reader).chain_err(|| "Failed to parse bencoded")?;
-    debug!("{}", torrent_dict);
+    // debug!("{}", torrent_dict);
     match torrent_dict {
         Bencoded::Dictionary(ref map) => {
             if !map.contains_key("announce") {
