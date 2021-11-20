@@ -357,6 +357,32 @@ fn build_url(base: &String, torrent: &Torrent) -> Result<reqwest::Url> {
     .chain_err(|| "Failed to parse announce url and parmeters")
 }
 
+async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("Not a http(s) url");
+    }
+    debug!("Constructing url");
+    let url = build_url(&torrent.announce, &torrent)?;
+    let response = reqwest::get(url)
+        .await
+        .chain_err(|| "Failed to get announce url")?;
+    let text = response
+        .text()
+        .await
+        .chain_err(|| "Couldn't read response text")?;
+    debug!("Got text: {}", text);
+    let decoded_response = read_bencoded(&mut BufReader::new(text.as_bytes()))?;
+    if let Some(failure_reason) = get_string_if_exists_as_utf8_string(
+        decoded_response.unwrap_dictionary()?,
+        "failure reason",
+    )? {
+        info!("Error from tracker: {}", failure_reason);
+        bail!("Tracker responded with error {}", failure_reason);
+    }
+    dbg!(decoded_response);
+    Ok(())
+}
+
 #[derive(PartialEq, TryFromPrimitive)]
 #[repr(i32)]
 enum AnnounceEvent {
@@ -371,6 +397,10 @@ enum AnnounceEvent {
 enum AnnounceAction {
     Connect = 0,
     Announce = 1,
+}
+
+fn choose_listen_port() -> i16 {
+    return 6881;
 }
 
 fn create_udp_socket(url: &str) -> Result<UdpSocket> {
@@ -423,10 +453,6 @@ fn connect_udp(socket: &UdpSocket) -> Result<i64> {
     }
     let connection_id = response.get_i64();
     return Ok(connection_id);
-}
-
-fn choose_listen_port() -> i16 {
-    return 6881;
 }
 
 fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Result<()> {
@@ -548,32 +574,6 @@ fn get_peers(torrent: &Torrent) -> Result<Vec<String>> {
         }
     }
     Ok(Vec::new())
-}
-
-async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        bail!("Not a http(s) url");
-    }
-    debug!("Constructing url");
-    let url = build_url(&torrent.announce, &torrent)?;
-    let response = reqwest::get(url)
-        .await
-        .chain_err(|| "Failed to get announce url")?;
-    let text = response
-        .text()
-        .await
-        .chain_err(|| "Couldn't read response text")?;
-    debug!("Got text: {}", text);
-    let decoded_response = read_bencoded(&mut BufReader::new(text.as_bytes()))?;
-    if let Some(failure_reason) = get_string_if_exists_as_utf8_string(
-        decoded_response.unwrap_dictionary()?,
-        "failure reason",
-    )? {
-        info!("Error from tracker: {}", failure_reason);
-        bail!("Tracker responded with error {}", failure_reason);
-    }
-    dbg!(decoded_response);
-    Ok(())
 }
 
 fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
@@ -926,6 +926,27 @@ fn peek_one_byte(reader: &mut BufReader<impl BufRead>) -> Result<u8> {
     Ok(*peek_bytes(reader, 1)?.get(0).unwrap())
 }
 
+fn read_until(
+    reader: &mut BufReader<impl BufRead>,
+    ch: u8,
+    max_length: Option<usize>,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut current_byte: u8;
+    loop {
+        current_byte = read_one_byte(reader)?;
+        if current_byte == ch {
+            return Ok(bytes);
+        }
+        bytes.push(current_byte);
+        if let Some(max) = max_length {
+            if bytes.len() > max {
+                bail!(errors::ErrorKind::ExceededMaxLength(max));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod reader_tests {
     use crate::{peek_bytes, peek_one_byte, read_bytes, read_one_byte};
@@ -969,26 +990,5 @@ mod reader_tests {
         let _first_char = read_one_byte(&mut reader).unwrap();
         let second_char = read_one_byte(&mut reader).unwrap() as char;
         assert_eq!(second_char, 'i');
-    }
-}
-
-fn read_until(
-    reader: &mut BufReader<impl BufRead>,
-    ch: u8,
-    max_length: Option<usize>,
-) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut current_byte: u8;
-    loop {
-        current_byte = read_one_byte(reader)?;
-        if current_byte == ch {
-            return Ok(bytes);
-        }
-        bytes.push(current_byte);
-        if let Some(max) = max_length {
-            if bytes.len() > max {
-                bail!(errors::ErrorKind::ExceededMaxLength(max));
-            }
-        }
     }
 }
