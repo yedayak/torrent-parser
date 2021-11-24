@@ -5,7 +5,7 @@ use bytes::{Buf, Bytes};
 use log::{debug, error, info, log, trace};
 use num_enum::TryFromPrimitive;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use reqwest::{Error, Url};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
@@ -460,7 +460,16 @@ fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Re
     let action = AnnounceAction::Announce as i32;
     let transaction_id = rand::random::<i32>();
     let info_hash = &torrent.info_hash;
-    let peer_id = "-SD6578123456789o012".bytes();
+    // Is there a better peer id to use? should this be randomised as well?
+    // https://www.bittorrent.org/beps/bep_0020.html
+    let mut peer_id = "-DY0001-".as_bytes().to_vec();
+    peer_id.extend(
+        &thread_rng()
+            .sample_iter(Alphanumeric)
+            .take(12)
+            .collect::<Vec<u8>>(),
+    );
+    debug!("Peer ID: {}", String::from_utf8_lossy(&peer_id));
     let downlaoded = 0i64;
     let left = torrent.info.total_length()?;
     let uploaded = 0i64;
