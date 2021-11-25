@@ -6,7 +6,7 @@ use log::{debug, error, info, log, trace};
 use num_enum::TryFromPrimitive;
 use rand::seq::SliceRandom;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use reqwest::{Error, Url};
+use reqwest::Url;
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -275,13 +275,13 @@ fn run() -> Result<()> {
 #[derive(Debug)]
 struct SingleFileInfo {
     length: i64,
-    md5sum: Option<String>,
+    _md5sum: Option<String>,
 }
 
 #[derive(Debug)]
 struct FileInfo {
     length: i64,
-    md5sum: Option<String>,
+    _md5sum: Option<String>,
     path: Vec<String>,
 }
 
@@ -660,7 +660,7 @@ fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
                     }
                     file_list.push(FileInfo {
                         length,
-                        md5sum,
+                        _md5sum: md5sum,
                         path: path_parts,
                     })
                 }
@@ -704,7 +704,10 @@ fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
                         private,
                         piece_length,
                         pieces,
-                        file: Some(SingleFileInfo { length, md5sum }),
+                        file: Some(SingleFileInfo {
+                            length,
+                            _md5sum: md5sum,
+                        }),
                         files: None,
                         name,
                     },
@@ -837,7 +840,6 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
 mod bencoded_tests {
     use crate::{errors::*, OrderdDict};
     use crate::{read_bencoded, Bencoded};
-    use std::collections::HashMap;
     use std::io::BufReader;
 
     #[test]
