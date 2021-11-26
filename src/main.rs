@@ -1,6 +1,4 @@
-#[macro_use]
-extern crate error_chain;
-
+use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes};
 use log::{debug, error, info, log, trace};
 use num_enum::TryFromPrimitive;
@@ -17,31 +15,19 @@ use std::iter::FromIterator;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
 use structopt::StructOpt;
+use thiserror::Error;
 
-mod errors {
-    error_chain! {
-        errors {
-            CompletedReader {
-                description("At the end of the reader, nothing to read")
-                display("Nothing to read")
-            }
-            ExceededMaxLength(length: usize) {
-                description("Exceeded the max length of reading specified")
-                display("Max length {} surpassed", length)
-            }
-            NoLeadingZeroesAllowd {
-                description("Bencoded integers can't have leading zeroes before them")
-                display("Leading zeroes found")
-            }
-            WrongTypeInTorrent(found: String) {
-                description("Wrong type in torrent")
-                display("The value {} is the wrong type", found)
-            }
-            Error
-        }
-    }
+#[derive(Error, Debug)]
+pub enum ParseTorrentError {
+    #[error("At the end of the reader, nothing to read")]
+    CompletedReader,
+    #[error("Max length {0} surpassed")]
+    ExceededMaxLength(usize),
+    #[error("Found leading zeroes, not following spec")]
+    NoLeadingZeroesAllowd,
+    #[error("Expected type {exp}, got {got}")]
+    WrongTypeInTorrent { exp: String, got: String },
 }
-use errors::*;
 
 #[derive(StructOpt)]
 struct Cli {
@@ -152,33 +138,53 @@ impl Bencoded {
     fn unwrap_integer(&self) -> Result<i64> {
         match self {
             Bencoded::Integer(val) => Ok(*val),
-            _ => Err(errors::ErrorKind::WrongTypeInTorrent("Integer".into()).into()),
+            _ => Err(ParseTorrentError::WrongTypeInTorrent {
+                exp: "Integer".to_string(),
+                got: self.to_string(),
+            }
+            .into()),
         }
     }
     fn unwrap_string(&self) -> Result<Vec<u8>> {
         match self {
             Bencoded::String(val) => Ok(val.to_vec()),
-            _ => Err(errors::ErrorKind::WrongTypeInTorrent("String".into()).into()),
+            _ => Err(ParseTorrentError::WrongTypeInTorrent {
+                exp: "String".to_string(),
+                got: self.to_string(),
+            }
+            .into()),
         }
     }
 
     fn unwrap_string_as_utf8(&self) -> Result<String> {
         match self {
             Bencoded::String(val) => Ok(String::from_utf8(val.to_vec())
-                .chain_err(|| "failed converting to utf8 encoded string")?),
-            _ => Err(errors::ErrorKind::WrongTypeInTorrent("String".into()).into()),
+                .with_context(|| "failed converting to utf8 encoded string")?),
+            _ => Err(ParseTorrentError::WrongTypeInTorrent {
+                exp: "String".to_string(),
+                got: self.to_string(),
+            }
+            .into()),
         }
     }
     fn unwrap_list(&self) -> Result<Vec<Bencoded>> {
         match self {
             Bencoded::List(val) => Ok(val.to_vec()),
-            _ => Err(errors::ErrorKind::WrongTypeInTorrent("List".into()).into()),
+            _ => Err(ParseTorrentError::WrongTypeInTorrent {
+                exp: "List".to_string(),
+                got: self.to_string(),
+            }
+            .into()),
         }
     }
     fn unwrap_dictionary(&self) -> Result<&OrderdDict<Bencoded>> {
         match self {
             Bencoded::Dictionary(val) => Ok(val),
-            _ => Err(errors::ErrorKind::WrongTypeInTorrent("Dictionary".into()).into()),
+            _ => Err(ParseTorrentError::WrongTypeInTorrent {
+                exp: "Dictionary".to_string(),
+                got: self.to_string(),
+            }
+            .into()),
         }
     }
 }
@@ -242,33 +248,23 @@ fn get_list_if_exists(map: &OrderdDict<Bencoded>, key: &str) -> Result<Option<Ve
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
-    if let Err(ref e) = run() {
-        error!("error: {}", e);
-
-        // Showng error chain
-        for e in e.iter().skip(1) {
-            error!("caused by: {}", e);
-        }
-
-        if let Some(backtrace) = e.backtrace() {
-            error!("backtrace: {:?}", backtrace);
-        }
-
-        ::std::process::exit(1);
-    }
+    run().await?;
+    Ok(())
 }
 
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     let args = Cli::from_args();
     debug!("Reading file {:?}, Verbosity: {}", args.file, args.verbose);
-    let file = File::open(args.file).chain_err(|| "Couldn't open file")?;
+    let file = File::open(args.file).with_context(|| "Couldn't open file")?;
     let reader = BufReader::new(file);
     let torrent = parse_torrent(reader)?;
     // debug!("parsed torrent: \n{:?}", torrent);
     debug!("info hash: {:x?}", torrent.info_hash);
     get_peers(&torrent)?;
+    // let a = contact_tracker(torrent).await?;
     Ok(())
 }
 
@@ -354,7 +350,7 @@ fn build_url(base: &String, torrent: &Torrent) -> Result<reqwest::Url> {
             ("event", "started"),
         ],
     )
-    .chain_err(|| "Failed to parse announce url and parmeters")
+    .context("Failed to parse announce url and parmeters")
 }
 
 async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
@@ -365,11 +361,11 @@ async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
     let url = build_url(&torrent.announce, &torrent)?;
     let response = reqwest::get(url)
         .await
-        .chain_err(|| "Failed to get announce url")?;
+        .context("Failed to get announce url")?;
     let text = response
         .text()
         .await
-        .chain_err(|| "Couldn't read response text")?;
+        .context("Couldn't read response text")?;
     debug!("Got text: {}", text);
     let decoded_response = read_bencoded(&mut BufReader::new(text.as_bytes()))?;
     if let Some(failure_reason) = get_string_if_exists_as_utf8_string(
@@ -404,9 +400,9 @@ fn choose_listen_port() -> i16 {
 }
 
 fn create_udp_socket(url: &str) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind("0.0.0.0:7686").chain_err(|| "failed to create udp socket")?;
+    let socket = UdpSocket::bind("0.0.0.0:7686").context("failed to create udp socket")?;
     debug!("connecting to {}", url);
-    socket.connect(url).chain_err(|| "Couldn't connect")?;
+    socket.connect(url).context("Couldn't connect")?;
     Ok(socket)
 }
 
@@ -419,14 +415,10 @@ fn connect_udp(socket: &UdpSocket) -> Result<i64> {
     packet.extend(protocol_id.to_be_bytes());
     packet.extend(action.to_be_bytes());
     packet.extend(transaction_id.to_be_bytes());
-    socket
-        .send(&packet)
-        .chain_err(|| "Couldn't send udp message")?;
+    socket.send(&packet).context("Couldn't send udp message")?;
     const MAX_RESPONSE_SIZE: usize = 1500; //MTU
     let mut buf = [0; MAX_RESPONSE_SIZE];
-    let bytes_read = socket
-        .recv(&mut buf)
-        .chain_err(|| "Couldn't receive data")?;
+    let bytes_read = socket.recv(&mut buf).context("Couldn't receive data")?;
     debug!("Read {} bytes", bytes_read);
     let mut response = Bytes::from(Box::from(&buf[..bytes_read]));
     if response.len() < 16 {
@@ -491,15 +483,13 @@ fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Re
     packet.extend(key.to_be_bytes());
     packet.extend(num_want.to_be_bytes());
     packet.extend(port.to_be_bytes());
-    socket
-        .send(&packet)
-        .chain_err(|| "Couldn't send udp message")?;
+    socket.send(&packet).context("Couldn't send udp message")?;
 
     const MAX_RESPONSE_SIZE: usize = 1500;
     let mut response = [0; MAX_RESPONSE_SIZE];
     let bytes_read = socket
         .recv(&mut response)
-        .chain_err(|| "Couldn't receive data")?;
+        .context("Couldn't receive data")?;
     debug!("Read {} bytes", bytes_read);
     let mut response = Bytes::from(Box::from(&response[..bytes_read]));
     if response.len() < 20 {
@@ -588,7 +578,7 @@ fn get_peers(torrent: &Torrent) -> Result<Vec<String>> {
 fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
     let buf_reader = BufReader::new(reader);
     let mut reader = buf_reader;
-    let torrent_dict = read_bencoded(&mut reader).chain_err(|| "Failed to parse bencoded")?;
+    let torrent_dict = read_bencoded(&mut reader).context("Failed to parse bencoded")?;
     // debug!("{}", torrent_dict);
     match torrent_dict {
         Bencoded::Dictionary(ref map) => {
@@ -750,7 +740,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
         let string_length = String::from_iter(digit_chars);
         let length = string_length
             .parse::<usize>()
-            .chain_err(|| "couldn't parse number")?;
+            .context("couldn't parse number")?;
         debug!("Reading {} characters", string_length);
         let actual_string = read_bytes(reader, length)?;
         let str = Bencoded::String(actual_string);
@@ -770,7 +760,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             if digit_count >= 1 && ch == 'e' {
                 let number = number_string
                     .parse::<i64>()
-                    .chain_err(|| "Couldnt convert to number")?;
+                    .context("Couldnt convert to number")?;
                 return Ok(Bencoded::Integer(number));
             }
             if !ch.is_ascii_digit() {
@@ -779,7 +769,7 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             number_string.push(ch);
             digit_count += 1;
             if digit_count > 1 && number_string.starts_with('0') {
-                return Err(errors::ErrorKind::NoLeadingZeroesAllowd.into());
+                return Err(ParseTorrentError::NoLeadingZeroesAllowd.into());
             }
         }
     }
@@ -795,13 +785,18 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             }
             current_item = read_bencoded(reader);
             match current_item {
-                Err(err) => match err {
-                    errors::Error(errors::ErrorKind::CompletedReader, _) => {
+                Err(err) => match err.downcast_ref::<ParseTorrentError>() {
+                    Some(ParseTorrentError::CompletedReader) => {
                         return Ok(Bencoded::List(items));
                     }
-                    errors::Error(_, _) => {
+                    _ => {
                         return Err(err);
-                    }
+                    } // errors::Error(errors::ErrorKind::CompletedReader, _) => {
+                      //     return Ok(Bencoded::List(items));
+                      // }
+                      // errors::Error(_, _) => {
+                      //     return Err(err);
+                      // }
                 },
                 Ok(value) => {
                     items.push(value);
@@ -822,14 +817,17 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             let bencoded_key = read_bencoded(reader)?;
             if let Bencoded::String(key) = bencoded_key {
                 // Keys are specified by the format so I assume they are actual utf8 strings
-                let key = String::from_utf8(key)
-                    .chain_err(|| "Bad assumption: This key is not utf8??")?;
+                let key =
+                    String::from_utf8(key).context("Bad assumption: This key is not utf8??")?;
                 debug!("Found key \"{}\", reading value", key);
                 let value = read_bencoded(reader)?;
                 debug!("Found value {}. Inserting...", value);
                 dict.insert(&key, value);
             } else {
-                bail!("Only Strings are can be keys in becoded dictionaries")
+                bail!(
+                    "Only Strings are can be keys in becoded dictionaries, not {}",
+                    bencoded_key
+                )
             }
         }
     }
@@ -838,8 +836,8 @@ fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
 
 #[cfg(test)]
 mod bencoded_tests {
-    use crate::{errors::*, OrderdDict};
     use crate::{read_bencoded, Bencoded};
+    use crate::{OrderdDict, ParseTorrentError};
     use std::io::BufReader;
 
     #[test]
@@ -852,9 +850,9 @@ mod bencoded_tests {
     fn no_leading_zeroes_allowd() {
         let mut reader = BufReader::new("i045e".as_bytes());
         match read_bencoded(&mut reader) {
-            Err(err) => match err.kind() {
-                ErrorKind::NoLeadingZeroesAllowd => {}
-                _ => panic!("Got wrong error: {}", err.kind()),
+            Err(err) => match err.downcast_ref::<ParseTorrentError>() {
+                Some(ParseTorrentError::NoLeadingZeroesAllowd) => {}
+                _ => panic!("Got wrong error: {}", err),
             },
             Ok(val) => {
                 panic!("Got {} instead of error", val);
@@ -905,7 +903,7 @@ mod bencoded_tests {
 
 fn read_bytes(reader: &mut BufReader<impl BufRead>, count: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0; count];
-    let mut bytes_read = reader.read(&mut buf).chain_err(|| "Failed to read bytes")?;
+    let mut bytes_read = reader.read(&mut buf).context("Failed to read bytes")?;
     while bytes_read < count && bytes_read != 0 {
         buf.resize(bytes_read, 0);
         debug!(
@@ -913,9 +911,7 @@ fn read_bytes(reader: &mut BufReader<impl BufRead>, count: usize) -> Result<Vec<
             count, bytes_read
         );
         let mut new_buf = vec![0; count - bytes_read];
-        bytes_read += reader
-            .read(&mut new_buf)
-            .chain_err(|| "Failed to read bytes")?;
+        bytes_read += reader.read(&mut new_buf).context("Failed to read bytes")?;
         buf.append(&mut new_buf);
     }
     Ok(buf)
@@ -926,9 +922,9 @@ fn read_one_byte(reader: &mut BufReader<impl BufRead>) -> Result<u8> {
 }
 
 fn peek_bytes(reader: &mut BufReader<impl BufRead>, byte_count: usize) -> Result<Vec<u8>> {
-    let buf = reader.fill_buf().chain_err(|| "Failed to peek")?;
+    let buf = reader.fill_buf().context("Failed to peek")?;
     if buf.len() < byte_count {
-        return Err(errors::ErrorKind::CompletedReader.into());
+        return Err(ParseTorrentError::CompletedReader.into());
     }
     return Ok(buf.get(0..byte_count).unwrap().to_vec());
 }
@@ -952,7 +948,7 @@ fn read_until(
         bytes.push(current_byte);
         if let Some(max) = max_length {
             if bytes.len() > max {
-                bail!(errors::ErrorKind::ExceededMaxLength(max));
+                bail!(ParseTorrentError::ExceededMaxLength(max));
             }
         }
     }
