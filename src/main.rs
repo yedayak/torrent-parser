@@ -45,8 +45,9 @@ async fn run() -> Result<()> {
     let torrent = parse_torrent(reader)?;
     // debug!("parsed torrent: \n{:?}", torrent);
     debug!("info hash: {:x?}", torrent.info_hash);
-    get_peers(&torrent)?;
-    // let a = contact_tracker(torrent).await?;
+    let peers = get_peers(&torrent)?;
+    debug!("Got peers {:?}", peers);
+
     Ok(())
 }
 
@@ -173,6 +174,29 @@ async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct Peer {
+    ip: Ipv4Addr,
+    port: u16,
+    choked: bool,
+    interested: bool,
+    am_choking: bool,
+    am_interseted: bool,
+}
+
+impl Peer {
+    fn new(ip: Ipv4Addr, port: u16) -> Self {
+        Self {
+            ip,
+            port,
+            choked: true,
+            interested: false,
+            am_choking: true,
+            am_interseted: true,
+        }
+    }
+}
+
 #[derive(PartialEq, TryFromPrimitive)]
 #[repr(i32)]
 enum AnnounceEvent {
@@ -241,7 +265,7 @@ fn connect_udp(socket: &UdpSocket) -> Result<i64> {
     return Ok(connection_id);
 }
 
-fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Result<()> {
+fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Result<Vec<Peer>> {
     let mut packet = Vec::<u8>::with_capacity(96);
     let action = AnnounceAction::Announce as i32;
     let transaction_id = rand::random::<i32>();
@@ -313,7 +337,11 @@ fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Re
     let leechers = response.get_i32();
     let seeders = response.get_i32();
     let peers_count = response.remaining() / 6;
-    let mut peers: Vec<(Ipv4Addr, u16)> = Vec::with_capacity(peers_count);
+    debug!(
+        "{} peers, {} leechers, {} seeders",
+        peers_count, leechers, seeders
+    );
+    let mut peers: Vec<Peer> = Vec::with_capacity(peers_count);
     for _ in 1..peers_count {
         let ip = Ipv4Addr::new(
             response.get_u8(),
@@ -322,22 +350,20 @@ fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Re
             response.get_u8(),
         );
         let port = response.get_u16();
-        peers.push((ip, port));
+        peers.push(Peer::new(ip, port));
     }
-    debug!("peers: {:?}", peers);
-
-    Ok(())
+    Ok(peers)
 }
 
-fn try_url(url: &String, torrent: &Torrent) -> Result<Vec<String>> {
+fn try_url(url: &String, torrent: &Torrent) -> Result<Vec<Peer>> {
     if url.starts_with("udp://") {
         // According to spec https://www.bittorrent.org/beps/bep_0015.html
         let url = &url[6..];
         let socket = create_udp_socket(&url)?;
         let connection_id = connect_udp(&socket)?;
-        announce_udp(&socket, connection_id, torrent)?;
-
         debug!("Got connection id {} from {}", connection_id, url);
+        let peers = announce_udp(&socket, connection_id, torrent)?;
+        return Ok(peers);
     } else if url.starts_with("http") {
         todo!();
         // contact_tracker_http(url, torrent);
@@ -345,7 +371,7 @@ fn try_url(url: &String, torrent: &Torrent) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-fn get_peers(torrent: &Torrent) -> Result<Vec<String>> {
+fn get_peers(torrent: &Torrent) -> Result<Vec<Peer>> {
     // Spec: https://www.bittorrent.org/beps/bep_0012.html
     info!("Trying announce {}", torrent.announce);
     match try_url(&torrent.announce, &torrent) {
@@ -366,7 +392,7 @@ fn get_peers(torrent: &Torrent) -> Result<Vec<String>> {
             }
         }
     }
-    Ok(Vec::new())
+    bail!("Failed to get peers");
 }
 
 fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
