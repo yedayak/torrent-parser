@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+#[allow(unused_imports)]
 use log::{debug, error, info, log, trace};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -144,14 +145,13 @@ impl Bencoded {
 }
 
 // TODO: All of these function should probably be impls of OrderdDict
-pub(crate) fn get_string_if_exists(
-    map: &OrderdDict<Bencoded>,
-    key: &str,
-) -> Result<Option<Vec<u8>>> {
-    if map.contains_key(key) {
-        Ok(Some(map.get(key).unwrap().unwrap_string()?))
-    } else {
-        Ok(None)
+impl OrderdDict<Bencoded> {
+    pub(crate) fn get_string_if_exists(self: &Self, key: &str) -> Result<Option<Vec<u8>>> {
+        if self.contains_key(key) {
+            Ok(Some(self.get(key).unwrap().unwrap_string()?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -220,7 +220,7 @@ impl<V> OrderdDict<V> {
     }
 
     pub(crate) fn insert(&mut self, key: &str, value: V) {
-        // No need to check if key is already present, we're fine with duplicate keys
+        // No need to check if key is already present, we're fine with duplicate keys. Are we??
         self.inner.insert(key.to_string(), value);
         self.keys.push(key.to_string())
     }
@@ -332,7 +332,10 @@ pub fn read_bencoded(reader: &mut BufReader<impl BufRead>) -> Result<Bencoded> {
             }
         }
     }
-    bail!("Couldn't find valid Bencoded value");
+    bail!(
+        "Couldn't find valid Bencoded value: found char {}",
+        first_ch
+    );
 }
 
 #[cfg(test)]

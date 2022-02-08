@@ -1,11 +1,14 @@
 // TODO: this is kind of absurd, should be impls of OrderedDict
 use crate::bencoded::{
-    get_integer_if_exists, get_list_if_exists, get_string_if_exists,
-    get_string_if_exists_as_utf8_string, Bencoded,
+    get_integer_if_exists,
+    get_list_if_exists, //get_string_if_exists,
+    get_string_if_exists_as_utf8_string,
+    Bencoded,
 };
 use anyhow::{bail, Context, Result};
 use bencoded::read_bencoded;
 use bytes::{Buf, Bytes};
+#[allow(unused_imports)]
 use log::{debug, error, info, log, trace};
 use num_enum::TryFromPrimitive;
 use rand::seq::SliceRandom;
@@ -272,13 +275,7 @@ fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Re
     let info_hash = &torrent.info_hash;
     // Is there a better peer id to use? should this be randomised as well?
     // https://www.bittorrent.org/beps/bep_0020.html
-    let mut peer_id = "-DY0001-".as_bytes().to_vec();
-    peer_id.extend(
-        &thread_rng()
-            .sample_iter(Alphanumeric)
-            .take(12)
-            .collect::<Vec<u8>>(),
-    );
+    let peer_id = generate_peer_id();
     debug!("Peer ID: {}", String::from_utf8_lossy(&peer_id));
     let downlaoded = 0i64;
     let left = torrent.info.total_length()?;
@@ -353,6 +350,17 @@ fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Re
         peers.push(Peer::new(ip, port));
     }
     Ok(peers)
+}
+
+fn generate_peer_id() -> Vec<u8> {
+    let mut peer_id = "-DY0001-".as_bytes().to_vec();
+    peer_id.extend(
+        &thread_rng()
+            .sample_iter(Alphanumeric)
+            .take(12)
+            .collect::<Vec<u8>>(),
+    );
+    peer_id
 }
 
 fn try_url(url: &String, torrent: &Torrent) -> Result<Vec<Peer>> {
@@ -456,7 +464,8 @@ fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
                         bail!("No length for file");
                     }
                     let length = file.get("length").unwrap().unwrap_integer()?;
-                    let md5sum = get_string_if_exists(file, "md5sum")?
+                    let md5sum = file
+                        .get_string_if_exists("md5sum")?
                         .as_ref()
                         .map(|vec| String::from_utf8_lossy(vec).to_string());
                     if !file.contains_key("path") {
