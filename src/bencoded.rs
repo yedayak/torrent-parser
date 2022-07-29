@@ -3,8 +3,7 @@ use anyhow::{bail, Context, Result};
 use log::{debug, error, info, log, trace};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::io::BufReader;
-use std::io::{BufRead, Read};
+use std::io::{BufReader, BufRead, Read};
 use std::iter::FromIterator;
 
 use crate::ParseTorrentError;
