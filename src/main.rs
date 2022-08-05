@@ -11,19 +11,19 @@ use bytes::{Buf, Bytes};
 #[allow(unused_imports)]
 use log::{debug, error, info, log, trace};
 use num_enum::TryFromPrimitive;
-use rand::seq::SliceRandom;
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use rand::{distributions::Alphanumeric, seq::SliceRandom, thread_rng, Rng};
 use reqwest::Url;
 use sha1::{Digest, Sha1};
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
 use structopt::StructOpt;
 use thiserror::Error;
 
 mod bencoded;
+mod peer_to_peer;
 
 #[derive(StructOpt)]
 struct Cli {
@@ -50,7 +50,7 @@ async fn run() -> Result<()> {
     debug!("info hash: {:x?}", torrent.info_hash);
     let peers = get_peers(&torrent)?;
     debug!("Got peers {:?}", peers);
-
+    peer_to_peer::interact(peers, torrent, generate_peer_id()).await?;
     Ok(())
 }
 
@@ -95,7 +95,7 @@ struct Info {
 }
 
 #[derive(Debug)]
-struct Torrent {
+pub struct Torrent {
     info: Info,
     info_hash: Vec<u8>,
     announce: String,
@@ -178,7 +178,7 @@ async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
 }
 
 #[derive(Debug)]
-struct Peer {
+pub struct Peer {
     ip: Ipv4Addr,
     port: u16,
     choked: bool,
