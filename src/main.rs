@@ -17,10 +17,12 @@ use sha1::{Digest, Sha1};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use structopt::StructOpt;
 use thiserror::Error;
+use tokio::{net::UdpSocket, time::timeout};
+use url as url_lib;
 
 mod bencoded;
 mod peer_to_peer;
@@ -48,7 +50,7 @@ async fn run() -> Result<()> {
     let torrent = parse_torrent(reader)?;
     // debug!("parsed torrent: \n{:?}", torrent);
     debug!("info hash: {:x?}", torrent.info_hash);
-    let peers = get_peers(&torrent)?;
+    let peers = get_peers(&torrent).await?;
     debug!("Got peers {:?}", peers);
     peer_to_peer::interact(peers, torrent, generate_peer_id()).await?;
     Ok(())
@@ -220,26 +222,42 @@ fn choose_listen_port() -> i16 {
     return 6881;
 }
 
-fn create_udp_socket(url: &str) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind("0.0.0.0:7686").context("failed to create udp socket")?;
-    debug!("connecting to {}", url);
-    socket.connect(url).context("Couldn't connect")?;
+async fn create_udp_socket(url: &str) -> Result<UdpSocket> {
+    let socket = UdpSocket::bind("0.0.0.0:7686")
+        .await
+        .context("failed to create udp socket")?;
+    debug!("connecting to {}, socket: {:?}", url, socket);
+    let parsed_url = url_lib::Url::parse(url)?;
+    debug!("Parsed url: {:?}", parsed_url);
+    let socket_addr = parsed_url.socket_addrs(|| None)?.pop().unwrap();
+    socket.connect(socket_addr).await?;
+    debug!("Connected successfully, socket: {:?}", socket);
     Ok(socket)
 }
 
-fn connect_udp(socket: &UdpSocket) -> Result<i64> {
+async fn connect_udp(socket: &UdpSocket) -> Result<i64> {
     // Gets connection id using the socket
     let mut packet = Vec::<u8>::with_capacity(64 + 32 + 32);
     let protocol_id = 0x41727101980i64;
-    let action = AnnounceAction::Connect as i32; // Connect
+    let action = AnnounceAction::Connect as i32;
     let transaction_id = rand::random::<i32>();
     packet.extend(protocol_id.to_be_bytes());
     packet.extend(action.to_be_bytes());
     packet.extend(transaction_id.to_be_bytes());
-    socket.send(&packet).context("Couldn't send udp message")?;
+    debug!("Sending initial udp packet to tracker");
+    socket
+        .send(&packet)
+        .await
+        .context("Couldn't send udp message")?;
     const MAX_RESPONSE_SIZE: usize = 1500; //MTU
     let mut buf = [0; MAX_RESPONSE_SIZE];
-    let bytes_read = socket.recv(&mut buf).context("Couldn't receive data")?;
+    let bytes_read = timeout(
+        tokio::time::Duration::from_millis(500),
+        socket.recv(&mut buf),
+    )
+    .await
+    .context("timedout waitng for tracker")?
+    .context("Couldn't receive data")?;
     debug!("Read {} bytes", bytes_read);
     let mut response = Bytes::from(Box::from(&buf[..bytes_read]));
     if response.len() < 16 {
@@ -268,7 +286,11 @@ fn connect_udp(socket: &UdpSocket) -> Result<i64> {
     return Ok(connection_id);
 }
 
-fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Result<Vec<Peer>> {
+async fn announce_udp(
+    socket: &UdpSocket,
+    connection_id: i64,
+    torrent: &Torrent,
+) -> Result<Vec<Peer>> {
     let mut packet = Vec::<u8>::with_capacity(96);
     let action = AnnounceAction::Announce as i32;
     let transaction_id = rand::random::<i32>();
@@ -298,12 +320,16 @@ fn announce_udp(socket: &UdpSocket, connection_id: i64, torrent: &Torrent) -> Re
     packet.extend(key.to_be_bytes());
     packet.extend(num_want.to_be_bytes());
     packet.extend(port.to_be_bytes());
-    socket.send(&packet).context("Couldn't send udp message")?;
+    socket
+        .send(&packet)
+        .await
+        .context("Couldn't send udp message")?;
 
     const MAX_RESPONSE_SIZE: usize = 1500;
     let mut response = [0; MAX_RESPONSE_SIZE];
     let bytes_read = socket
         .recv(&mut response)
+        .await
         .context("Couldn't receive data")?;
     debug!("Read {} bytes", bytes_read);
     let mut response = Bytes::from(Box::from(&response[..bytes_read]));
@@ -363,26 +389,27 @@ fn generate_peer_id() -> Vec<u8> {
     peer_id
 }
 
-fn try_url(url: &String, torrent: &Torrent) -> Result<Vec<Peer>> {
+async fn try_url(url: &String, torrent: &Torrent) -> Result<Vec<Peer>> {
     if url.starts_with("udp://") {
+        debug!("url {:?} is udp", url);
         // According to spec https://www.bittorrent.org/beps/bep_0015.html
-        let url = &url[6..];
-        let socket = create_udp_socket(&url)?;
-        let connection_id = connect_udp(&socket)?;
+        let socket = create_udp_socket(&url).await?;
+        let connection_id = connect_udp(&socket).await?;
         debug!("Got connection id {} from {}", connection_id, url);
-        let peers = announce_udp(&socket, connection_id, torrent)?;
+        let peers = announce_udp(&socket, connection_id, torrent).await?;
         return Ok(peers);
     } else if url.starts_with("http") {
-        todo!();
-        // contact_tracker_http(url, torrent);
+        // todo!();
+        debug!("url {:?} is http", url);
+        contact_tracker_http(url, torrent).await?;
     }
-    Ok(Vec::new())
+    bail!("Unkown url, couldn't announce");
 }
 
-fn get_peers(torrent: &Torrent) -> Result<Vec<Peer>> {
+async fn get_peers(torrent: &Torrent) -> Result<Vec<Peer>> {
     // Spec: https://www.bittorrent.org/beps/bep_0012.html
     info!("Trying announce {}", torrent.announce);
-    match try_url(&torrent.announce, &torrent) {
+    match try_url(&torrent.announce, &torrent).await {
         Ok(peers) => return Ok(peers),
         Err(err) => info!("Failed to get url {} : {}", torrent.announce, err),
     }
@@ -393,9 +420,9 @@ fn get_peers(torrent: &Torrent) -> Result<Vec<Peer>> {
             tier.shuffle(&mut thread_rng());
             for tracker in tier {
                 debug!("Trying tracker {}", tracker);
-                match try_url(&tracker, torrent) {
+                match try_url(&tracker, torrent).await {
                     Ok(peers) => return Ok(peers),
-                    Err(err) => info!("Failed to get url {} : {}", torrent.announce, err),
+                    Err(err) => info!("Failed to get url {} : {}", tracker, err),
                 }
             }
         }
