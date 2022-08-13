@@ -78,10 +78,11 @@ struct SingleFileInfo {
 struct FileInfo {
     length: i64,
     _md5sum: Option<String>,
-    path: Vec<String>,
+    _path: Vec<String>,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Info {
     piece_length: i64,
     pieces: Vec<u8>,
@@ -96,6 +97,7 @@ struct Info {
     name: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Torrent {
     info: Info,
@@ -122,9 +124,11 @@ impl Info {
 fn url_encode_bytes(bytes: &Vec<u8>) -> String {
     // URL encoding arbitary bytes according to bittorrent spec
     // https://wiki.theory.org/BitTorrentSpecification#Tracker_HTTP.2FHTTPS_Protocol
-
-    let unencoded_chars =
-        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-_~".as_bytes();
+    let unencoded_chars = HashSet::<_>::from_iter(
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-_~"
+            .as_bytes()
+            .iter(),
+    );
     let mut encoded = String::new();
     for byte in bytes {
         if unencoded_chars.contains(&byte) {
@@ -178,7 +182,7 @@ async fn contact_tracker_http(url: &String, torrent: &Torrent) -> Result<()> {
     dbg!(decoded_response);
     Ok(())
 }
-
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Peer {
     ip: Ipv4Addr,
@@ -295,8 +299,6 @@ async fn announce_udp(
     let action = AnnounceAction::Announce as i32;
     let transaction_id = rand::random::<i32>();
     let info_hash = &torrent.info_hash;
-    // Is there a better peer id to use? should this be randomised as well?
-    // https://www.bittorrent.org/beps/bep_0020.html
     let peer_id = generate_peer_id();
     debug!("Peer ID: {}", String::from_utf8_lossy(&peer_id));
     let downlaoded = 0i64;
@@ -364,6 +366,7 @@ async fn announce_udp(
         "{} peers, {} leechers, {} seeders",
         peers_count, leechers, seeders
     );
+    debug!("interval {interval}");
     let mut peers: Vec<Peer> = Vec::with_capacity(peers_count);
     for _ in 1..peers_count {
         let ip = Ipv4Addr::new(
@@ -379,6 +382,8 @@ async fn announce_udp(
 }
 
 fn generate_peer_id() -> Vec<u8> {
+    // Is there a better peer id to use? should this be randomised as well?
+    // https://www.bittorrent.org/beps/bep_0020.html
     let mut peer_id = "-DY0001-".as_bytes().to_vec();
     peer_id.extend(
         &thread_rng()
@@ -507,7 +512,7 @@ fn parse_torrent(reader: impl BufRead) -> Result<Torrent> {
                     file_list.push(FileInfo {
                         length,
                         _md5sum: md5sum,
-                        path: path_parts,
+                        _path: path_parts,
                     })
                 }
                 return Ok(Torrent {
