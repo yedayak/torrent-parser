@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-structopt = "0.3.23"
+clap = { version = "4.0.13", features = ["derive", "wrap_help"] }
 anyhow = "1.0.48"
 thiserror = "1.0.30"
 log = "0.4.14"

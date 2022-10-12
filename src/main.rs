@@ -8,8 +8,10 @@ use crate::bencoded::{
 use anyhow::{bail, Context, Result};
 use bencoded::read_bencoded;
 use bytes::{Buf, Bytes};
+use clap::{ArgAction, Parser};
+use log::LevelFilter;
 #[allow(unused_imports)]
-use log::{debug, error, info, log, trace};
+use log::{debug, error, info, log, trace, warn};
 use num_enum::TryFromPrimitive;
 use rand::{distributions::Alphanumeric, seq::SliceRandom, thread_rng, Rng};
 use reqwest::Url;
@@ -19,7 +21,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use structopt::StructOpt;
 use thiserror::Error;
 use tokio::{net::UdpSocket, time::timeout};
 use url as url_lib;
@@ -27,24 +28,43 @@ use url as url_lib;
 mod bencoded;
 mod peer_to_peer;
 
-#[derive(StructOpt)]
+#[derive(Parser)]
 struct Cli {
-    #[structopt(parse(from_os_str))]
+    #[arg()]
     file: PathBuf,
-    #[structopt(short, long, parse(from_occurrences))]
+    #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
-    run().await?;
+    let args = Cli::parse();
+    // If we user didn't specify verbosity, use the default or from RUST_LOG env
+    let log_level = if args.verbose == 0 {
+        None
+    } else if args.verbose == 1 {
+        Some(LevelFilter::Info)
+    } else if args.verbose == 2 {
+        Some(LevelFilter::Debug)
+    } else {
+        Some(LevelFilter::Trace)
+    };
+    let mut builder = env_logger::Builder::new();
+    builder.parse_default_env();
+    if log_level.is_some() {
+        builder.filter_level(log_level.unwrap());
+    }
+    builder.init();
+    debug!(
+        "Verbosity from command line: {} -> {:?}",
+        args.verbose, log_level
+    );
+    run(args).await?;
     Ok(())
 }
 
-async fn run() -> Result<()> {
-    let args = Cli::from_args();
-    debug!("Reading file {:?}, Verbosity: {}", args.file, args.verbose);
+async fn run(args: Cli) -> Result<()> {
+    debug!("Reading file {:?}", args.file);
     let file = File::open(args.file).with_context(|| "Couldn't open file")?;
     let reader = BufReader::new(file);
     let torrent = parse_torrent(reader)?;
